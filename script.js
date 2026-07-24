@@ -2573,16 +2573,18 @@ function renderReportCardHTML(data) {
       </div>
     </div>
 
-    <table class="rc-subjects-table rc-ledger-table">
-      <thead>
-        <tr><th rowspan="2">Subject</th>${groupHeaderCells}<th rowspan="2">Grade</th><th rowspan="2">Teacher's Remark</th></tr>
-        <tr>${subHeaderCells}</tr>
-      </thead>
-      <tbody>
-        <tr class="rc-mark-obtainable"><td>Mark Obtainable</td>${markObtainableCells}<td></td><td></td></tr>
-        ${subjectBodyRows || `<tr><td colspan="${2 + includedTermNames.length * 3}" style="text-align:center;color:var(--color-slate);">No approved subject results yet.</td></tr>`}
-      </tbody>
-    </table>
+    <div class="rc-table-scroll">
+      <table class="rc-subjects-table rc-ledger-table">
+        <thead>
+          <tr><th rowspan="2">Subject</th>${groupHeaderCells}<th rowspan="2">Grade</th><th rowspan="2">Teacher's Remark</th></tr>
+          <tr>${subHeaderCells}</tr>
+        </thead>
+        <tbody>
+          <tr class="rc-mark-obtainable"><td>Mark Obtainable</td>${markObtainableCells}<td></td><td></td></tr>
+          ${subjectBodyRows || `<tr><td colspan="${2 + includedTermNames.length * 3}" style="text-align:center;color:var(--color-slate);">No approved subject results yet.</td></tr>`}
+        </tbody>
+      </table>
+    </div>
 
     ${enrollment.terms.name === 'Third Term' && card.annual_average != null ? `
       <div class="rc-summary" style="grid-template-columns: repeat(2, 1fr);">
