@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Strong Pillar Int'l Nursery and Primary School — Result Management System</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- ==========================================================================
+     TOAST / ALERT REGION (global, used by showToast() in script.js)
+     ========================================================================== -->
+<div id="toast-region" aria-live="polite"></div>
+
+<!-- ==========================================================================
+     LOADING OVERLAY (global, toggled by showLoading()/hideLoading())
+     ========================================================================== -->
+<div id="loading-overlay" class="loading-overlay hidden" role="status" aria-live="polite" aria-label="Loading">
+  <div class="loading-seal"><span>SP</span></div>
+</div>
+
+<!-- ==========================================================================
+     VIEW: LOGIN
+     ========================================================================== -->
+<main id="view-login" class="view view-login">
+  <section class="login-brand-pane">
+    <div class="login-seal"><span>SP</span></div>
+    <h1 id="login-school-name" class="login-school-name">Strong Pillar Int'l Nursery and Primary School</h1>
+    <p id="login-motto" class="login-motto">Result Management System</p>
+    <div class="ledger-rule"></div>
+    <p class="login-brand-footnote">Records &nbsp;·&nbsp; Reports &nbsp;·&nbsp; Results</p>
+  </section>
+
+  <section class="login-form-pane">
+    <div class="login-form-card">
+      <h2 class="login-form-title">Sign in</h2>
+      <p class="login-form-subtitle">Administrators, teachers, and parents all sign in here.</p>
+
+      <form id="login-form" novalidate>
+        <label class="field-label" for="login-email">Email</label>
+        <input class="field-input" type="email" id="login-email" name="email" autocomplete="username" required>
+
+        <label class="field-label" for="login-password">Password</label>
+        <input class="field-input" type="password" id="login-password" name="password" autocomplete="current-password" required>
+
+        <p id="login-error" class="field-error hidden" role="alert"></p>
+
+        <button type="submit" class="btn btn-primary btn-block" id="login-submit-btn">Sign in</button>
+      </form>
+
+      <button type="button" class="link-btn" id="forgot-password-btn">Forgot password?</button>
+      <button type="button" class="link-btn" id="show-activate-btn">Staff or parent? Activate your account</button>
+      <button type="button" class="link-btn" id="show-contact-btn">Need help? Contact the school</button>
+    </div>
+
+    <div class="login-form-card hidden" id="activate-form-card">
+      <h2 class="login-form-title">Activate your account</h2>
+      <p class="login-form-subtitle">Use the same email your administrator registered you with, and choose a password.</p>
+
+      <form id="activate-form" novalidate>
+        <label class="field-label" for="activate-email">Email</label>
+        <input class="field-input" type="email" id="activate-email" autocomplete="username" required>
+
+        <label class="field-label" for="activate-password">Choose a password</label>
+        <input class="field-input" type="password" id="activate-password" autocomplete="new-password" minlength="8" required>
+
+        <label class="field-label" for="activate-password-confirm">Confirm password</label>
+        <input class="field-input" type="password" id="activate-password-confirm" autocomplete="new-password" minlength="8" required>
+
+        <p id="activate-error" class="field-error hidden" role="alert"></p>
+        <p id="activate-notice" class="field-error hidden" style="color:#2F5233;background:#E9F0E7;" role="status"></p>
+
+        <button type="submit" class="btn btn-primary btn-block" id="activate-submit-btn">Activate account</button>
+      </form>
+
+      <button type="button" class="link-btn" id="back-to-login-btn">Back to sign in</button>
+    </div>
+
+    <div class="login-form-card hidden" id="contact-form-card">
+      <h2 class="login-form-title">Contact the school</h2>
+      <p class="login-form-subtitle">Send a message directly to the school office.</p>
+
+      <form id="contact-form" novalidate>
+        <label class="field-label" for="contact-name">Your name</label>
+        <input class="field-input" id="contact-name" required>
+
+        <label class="field-label" for="contact-email">Your email</label>
+        <input class="field-input" type="email" id="contact-email" required>
+
+        <label class="field-label" for="contact-message">Message</label>
+        <textarea class="field-input field-textarea" id="contact-message" rows="4" required></textarea>
+
+        <p id="contact-error" class="field-error hidden" role="alert"></p>
+        <p id="contact-notice" class="field-error hidden" style="color:#2F5233;background:#E9F0E7;" role="status"></p>
+
+        <button type="submit" class="btn btn-primary btn-block" id="contact-submit-btn">Send message</button>
+      </form>
+
+      <button type="button" class="link-btn" id="back-to-login-from-contact-btn">Back to sign in</button>
+    </div>
+  </section>
+</main>
+
+<!-- ==========================================================================
+     VIEW: FIRST-TIME SETUP WIZARD
+     Shown only when the signed-in user is admin and school_settings.setup_
+     completed = false. Blocks the normal app shell until finished.
+     ========================================================================== -->
+<main id="view-wizard" class="view view-wizard hidden">
+  <div class="wizard-shell">
+
+    <aside class="wizard-steps" aria-label="Setup steps">
+      <div class="wizard-brand">
+        <div class="wizard-seal"><span>SP</span></div>
+        <strong>First-Time Setup</strong>
+      </div>
+      <ol id="wizard-step-list" class="wizard-step-list">
+        <li data-step="1"><span class="step-num">1</span> School Identity</li>
+        <li data-step="2"><span class="step-num">2</span> Academic Session &amp; Terms</li>
+        <li data-step="3"><span class="step-num">3</span> Classes &amp; Arms</li>
+        <li data-step="4"><span class="step-num">4</span> Subjects</li>
+        <li data-step="5"><span class="step-num">5</span> Grading System</li>
+        <li data-step="6"><span class="step-num">6</span> Administrator Account</li>
+        <li data-step="7"><span class="step-num">7</span> Finish</li>
+      </ol>
+    </aside>
+
+    <section class="wizard-panel">
+
+      <!-- STEP 1: School Identity -->
+      <form id="wizard-step-1" class="wizard-step-form" data-step="1">
+        <h2>School Identity</h2>
+        <p class="wizard-step-sub">This appears on the login screen, report cards, and every printed document.</p>
+
+        <label class="field-label" for="wz-school-name">School name</label>
+        <input class="field-input" id="wz-school-name" required>
+
+        <label class="field-label" for="wz-motto">Motto</label>
+        <input class="field-input" id="wz-motto">
+
+        <div class="field-row">
+          <div>
+            <label class="field-label" for="wz-phone">Phone</label>
+            <input class="field-input" id="wz-phone">
+          </div>
+          <div>
+            <label class="field-label" for="wz-email">Email</label>
+            <input class="field-input" type="email" id="wz-email">
+          </div>
+        </div>
+
+        <label class="field-label" for="wz-address">Address</label>
+        <input class="field-input" id="wz-address">
+
+        <label class="field-label" for="wz-principal-name">Principal's name</label>
+        <input class="field-input" id="wz-principal-name">
+
+        <div class="field-row">
+          <div>
+            <label class="field-label" for="wz-logo-file">School logo</label>
+            <input class="field-input" type="file" id="wz-logo-file" accept="image/*">
+          </div>
+          <div>
+            <label class="field-label" for="wz-signature-file">Principal's signature (optional)</label>
+            <input class="field-input" type="file" id="wz-signature-file" accept="image/*">
+          </div>
+        </div>
+
+        <div class="wizard-actions">
+          <span></span>
+          <button type="submit" class="btn btn-primary">Save &amp; continue</button>
+        </div>
+      </form>
+
+      <!-- STEP 2: Academic Session & Terms -->
+      <form id="wizard-step-2" class="wizard-step-form hidden" data-step="2">
+        <h2>Academic Session &amp; Terms</h2>
+        <p class="wizard-step-sub">Create your first session and its three terms. You can add more sessions later from Settings.</p>
+
+        <label class="field-label" for="wz-session-name">Session name</label>
+        <input class="field-input" id="wz-session-name" placeholder="e.g. 2026/2027" required>
+
+        <div class="wizard-term-rows" id="wizard-term-rows">
+          <div class="wizard-term-row" data-term="First Term">
+            <strong>First Term</strong>
+            <label class="field-label" for="wz-first-start">Start date</label>
+            <input class="field-input" type="date" id="wz-first-start" data-field="start">
+            <label class="field-label" for="wz-first-end">End date</label>
+            <input class="field-input" type="date" id="wz-first-end" data-field="end">
+            <label class="checkbox-label"><input type="radio" name="wz-current-term" value="First Term" checked> This is the current term</label>
+          </div>
+          <div class="wizard-term-row" data-term="Second Term">
+            <strong>Second Term</strong>
+            <label class="field-label" for="wz-second-start">Start date</label>
+            <input class="field-input" type="date" id="wz-second-start" data-field="start">
+            <label class="field-label" for="wz-second-end">End date</label>
+            <input class="field-input" type="date" id="wz-second-end" data-field="end">
+            <label class="checkbox-label"><input type="radio" name="wz-current-term" value="Second Term"> This is the current term</label>
+          </div>
+          <div class="wizard-term-row" data-term="Third Term">
+            <strong>Third Term</strong>
+            <label class="field-label" for="wz-third-start">Start date</label>
+            <input class="field-input" type="date" id="wz-third-start" data-field="start">
+            <label class="field-label" for="wz-third-end">End date</label>
+            <input class="field-input" type="date" id="wz-third-end" data-field="end">
+            <label class="checkbox-label"><input type="radio" name="wz-current-term" value="Third Term"> This is the current term</label>
+          </div>
+        </div>
+
+        <div class="wizard-actions">
+          <button type="button" class="btn btn-ghost-dark wizard-back-btn">Back</button>
+          <button type="submit" class="btn btn-primary">Save &amp; continue</button>
+        </div>
+      </form>
+
+      <!-- STEP 3: Classes & Arms -->
+      <form id="wizard-step-3" class="wizard-step-form hidden" data-step="3">
+        <h2>Classes &amp; Arms</h2>
+        <p class="wizard-step-sub">Add each class and its arms (e.g. "A, B, C"). Leave arms blank for a single unnamed arm.</p>
+
+        <div id="wizard-class-rows" class="wizard-repeat-rows"></div>
+        <button type="button" class="btn btn-ghost" id="wizard-add-class-row">+ Add class</button>
+
+        <div class="wizard-actions">
+          <button type="button" class="btn btn-ghost-dark wizard-back-btn">Back</button>
+          <button type="submit" class="btn btn-primary">Save &amp; continue</button>
+        </div>
+      </form>
+
+      <!-- STEP 4: Subjects -->
+      <form id="wizard-step-4" class="wizard-step-form hidden" data-step="4">
+        <h2>Subjects</h2>
+        <p class="wizard-step-sub">List your subjects. All subjects are assigned to all classes to start — refine per-class assignment later under Classes &amp; Subjects.</p>
+
+        <label class="field-label" for="wz-subjects-textarea">Subjects (one per line)</label>
+        <textarea class="field-input field-textarea" id="wz-subjects-textarea" rows="8" placeholder="Mathematics
+English Language
+Basic Science
+Social Studies"></textarea>
+
+        <div class="wizard-actions">
+          <button type="button" class="btn btn-ghost-dark wizard-back-btn">Back</button>
+          <button type="submit" class="btn btn-primary">Save &amp; continue</button>
+        </div>
+      </form>
+
+      <!-- STEP 5: Grading System -->
+      <form id="wizard-step-5" class="wizard-step-form hidden" data-step="5">
+        <h2>Grading System</h2>
+        <p class="wizard-step-sub">Review or adjust the grade bands. CA (max 40) + Exam (max 60) = Total out of 100.</p>
+
+        <div id="wizard-grading-rows" class="wizard-grading-rows"></div>
+        <button type="button" class="btn btn-ghost" id="wizard-add-grade-row">+ Add band</button>
+
+        <div class="wizard-actions">
+          <button type="button" class="btn btn-ghost-dark wizard-back-btn">Back</button>
+          <button type="submit" class="btn btn-primary">Save &amp; continue</button>
+        </div>
+      </form>
+
+      <!-- STEP 6: Administrator Account (confirmation only — created outside the wizard) -->
+      <div id="wizard-step-6" class="wizard-step-form hidden" data-step="6">
+        <h2>Administrator Account</h2>
+        <p class="wizard-step-sub">Your administrator account is already active — you're signed in with it now.</p>
+        <div class="card">
+          <dl class="kv-list" id="wizard-admin-list"></dl>
+        </div>
+        <p class="wizard-step-sub">Additional admin or teacher accounts can be created later from Staff &amp; Teachers.</p>
+
+        <div class="wizard-actions">
+          <button type="button" class="btn btn-ghost-dark wizard-back-btn">Back</button>
+          <button type="button" class="btn btn-primary" id="wizard-step-6-continue">Continue</button>
+        </div>
+      </div>
+
+      <!-- STEP 7: Finish -->
+      <div id="wizard-step-7" class="wizard-step-form hidden" data-step="7">
+        <h2>All set</h2>
+        <p class="wizard-step-sub">Your school identity, academic session, classes, subjects, and grading system are saved. You can change any of this later from School Settings.</p>
+
+        <div class="wizard-actions">
+          <button type="button" class="btn btn-ghost-dark wizard-back-btn">Back</button>
+          <button type="button" class="btn btn-primary" id="wizard-finish-btn">Finish setup &amp; go to dashboard</button>
+        </div>
+      </div>
+
+    </section>
+  </div>
+</main>
+
+<!-- ==========================================================================
+     APP SHELL — shown after successful auth. Sidebar contents are populated
+     per-role by renderSidebar() in script.js.
+     ========================================================================== -->
+<div id="view-app" class="view view-app hidden">
+  <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+
+  <aside id="app-sidebar" class="app-sidebar">
+    <div class="sidebar-brand">
+      <div class="sidebar-seal"><span>SP</span></div>
+      <div class="sidebar-brand-text">
+        <strong id="sidebar-school-name">Strong Pillar</strong>
+        <small>Result Management</small>
+      </div>
+    </div>
+
+    <nav id="sidebar-nav" class="sidebar-nav" aria-label="Main navigation">
+      <!-- populated by renderSidebar() -->
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="sidebar-user">
+        <span id="sidebar-user-name">—</span>
+        <small id="sidebar-user-role">—</small>
+      </div>
+      <button type="button" class="btn btn-ghost btn-block" id="logout-btn">Sign out</button>
+    </div>
+  </aside>
+
+  <div class="app-main-col">
+    <header class="app-topbar">
+      <button type="button" class="sidebar-toggle" id="sidebar-toggle-btn" aria-label="Toggle navigation">☰</button>
+      <div class="topbar-context">
+        <span id="topbar-session-term">—</span>
+      </div>
+    </header>
+
+    <main id="app-content" class="app-content">
+      <!-- ====================================================================
+           DASHBOARD — placeholder content for Phase 1. Real dashboard
+           widgets (stats cards, charts) are built in the analytics phase.
+           ==================================================================== -->
+      <section id="view-dashboard" class="content-view">
+        <div class="view-header">
+          <h1 id="dashboard-heading">Dashboard</h1>
+          <p id="dashboard-subheading" class="view-subheading"></p>
+        </div>
+
+        <div id="dashboard-analytics"></div>
+
+        <div class="card">
+          <h2 class="card-title">Signed in as</h2>
+          <dl class="kv-list">
+            <div><dt>Name</dt><dd id="dash-user-name">—</dd></div>
+            <div><dt>Role</dt><dd id="dash-user-role">—</dd></div>
+            <div><dt>Email</dt><dd id="dash-user-email">—</dd></div>
+          </dl>
+        </div>
+      </section>
+
+      <!-- ====================================================================
+           STAFF & TEACHERS
+           ==================================================================== -->
+      <section id="view-staff" class="content-view hidden">
+        <div class="view-header">
+          <h1>Staff &amp; Teachers</h1>
+          <p class="view-subheading">Create login accounts for administrators and class teachers.</p>
+        </div>
+
+        <div id="staff-form-card" class="inline-form-card hidden">
+          <h3>Add staff or teacher</h3>
+          <form id="staff-form">
+            <div class="form-grid">
+              <div><label class="field-label" for="staff-full-name">Full name</label><input class="field-input" id="staff-full-name" required></div>
+              <div><label class="field-label" for="staff-email">Email</label><input class="field-input" type="email" id="staff-email" required></div>
+              <div><label class="field-label" for="staff-phone">Phone</label><input class="field-input" id="staff-phone"></div>
+              <div><label class="field-label" for="staff-role">Role</label>
+                <select class="field-input" id="staff-role">
+                  <option value="teacher">Class Teacher</option>
+                  <option value="admin">Administrator</option>
+                </select>
+              </div>
+              <div><label class="field-label" for="staff-number">Staff number</label><input class="field-input" id="staff-number"></div>
+              <div><label class="field-label" for="staff-employed-date">Employed date</label><input class="field-input" type="date" id="staff-employed-date"></div>
+            </div>
+            <p class="view-subheading" style="margin-top:10px;">No password needed here — they'll set their own the first time they sign in, using this email, via "Activate your account" on the login screen.</p>
+            <p class="field-error hidden" id="staff-form-error" role="alert"></p>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-primary">Save</button>
+              <button type="button" class="btn btn-ghost-dark" id="staff-form-cancel">Cancel</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="table-toolbar">
+          <input class="table-search" id="staff-search" placeholder="Search staff by name or email…">
+          <button type="button" class="btn btn-primary" id="staff-add-btn">+ Add staff / teacher</button>
+        </div>
+
+        <table class="data-table">
+          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Staff No.</th><th>Assigned arm</th><th>Status</th><th></th></tr></thead>
+          <tbody id="staff-table-body"><tr class="empty-row"><td colspan="7">Loading…</td></tr></tbody>
+        </table>
+        <div class="pagination-bar" id="staff-pagination"></div>
+      </section>
+
+      <!-- ====================================================================
+           PARENTS
+           ==================================================================== -->
+      <section id="view-parents" class="content-view hidden">
+        <div class="view-header">
+          <h1>Parents</h1>
+          <p class="view-subheading">Create login accounts for parents/guardians so they can view report cards.</p>
+        </div>
+
+        <div id="parent-form-card" class="inline-form-card hidden">
+          <h3>Add parent</h3>
+          <form id="parent-form">
+            <div class="form-grid">
+              <div><label class="field-label" for="parent-full-name">Full name</label><input class="field-input" id="parent-full-name" required></div>
+              <div><label class="field-label" for="parent-email">Email</label><input class="field-input" type="email" id="parent-email" required></div>
+              <div><label class="field-label" for="parent-phone">Phone</label><input class="field-input" id="parent-phone"></div>
+              <div><label class="field-label" for="parent-address">Address</label><input class="field-input" id="parent-address"></div>
+            </div>
+            <p class="view-subheading" style="margin-top:10px;">No password needed here — they'll set their own the first time they sign in, using this email, via "Activate your account" on the login screen.</p>
+            <p class="field-error hidden" id="parent-form-error" role="alert"></p>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-primary">Save</button>
+              <button type="button" class="btn btn-ghost-dark" id="parent-form-cancel">Cancel</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="table-toolbar">
+          <input class="table-search" id="parent-search" placeholder="Search parents by name or email…">
+          <button type="button" class="btn btn-primary" id="parent-add-btn">+ Add parent</button>
+        </div>
+
+        <table class="data-table">
+          <thead><tr><th>Name</th><th>Email</th><th>Phone</th><th>Children</th><th>Status</th><th></th></tr></thead>
+          <tbody id="parent-table-body"><tr class="empty-row"><td colspan="6">Loading…</td></tr></tbody>
+        </table>
+        <div class="pagination-bar" id="parent-pagination"></div>
+      </section>
+
+      <!-- ====================================================================
+           CLASSES & SUBJECTS
+           ==================================================================== -->
+      <section id="view-classes" class="content-view hidden">
+        <div class="view-header">
+          <h1>Classes &amp; Subjects</h1>
+          <p class="view-subheading">Manage classes, arms, class-teacher assignment, and subject lists.</p>
+        </div>
+
+        <div class="card">
+          <h2 class="card-title">Add a class</h2>
+          <div class="form-grid">
+            <div><label class="field-label" for="new-class-name">Class name</label><input class="field-input" id="new-class-name" placeholder="e.g. Primary 4"></div>
+            <div><label class="field-label" for="new-class-arms">Arms (comma-separated)</label><input class="field-input" id="new-class-arms" placeholder="e.g. A, B"></div>
+          </div>
+          <div class="form-actions"><button type="button" class="btn btn-primary" id="add-class-btn">Add class</button></div>
+        </div>
+
+        <div id="classes-list"></div>
+
+        <div class="card">
+          <h2 class="card-title">Subjects</h2>
+          <div class="form-grid">
+            <div><label class="field-label" for="new-subject-name">New subject name</label><input class="field-input" id="new-subject-name" placeholder="e.g. Verbal Reasoning"></div>
+            <div><label class="field-label" for="new-subject-code">Code (optional)</label><input class="field-input" id="new-subject-code"></div>
+          </div>
+          <div class="form-actions"><button type="button" class="btn btn-primary" id="add-subject-btn">Add subject</button></div>
+          <div id="subjects-chip-list" style="margin-top:14px;"></div>
+        </div>
+      </section>
+
+      <!-- ====================================================================
+           STUDENTS
+           ==================================================================== -->
+      <section id="view-students" class="content-view hidden">
+        <div class="view-header">
+          <h1>Students</h1>
+          <p class="view-subheading">Register students and enroll them into a class/arm for the current term.</p>
+        </div>
+
+        <div id="student-form-card" class="inline-form-card hidden">
+          <h3>Add student</h3>
+          <form id="student-form">
+            <div class="form-grid">
+              <div><label class="field-label" for="student-admission-number">Admission number</label><input class="field-input" id="student-admission-number" required></div>
+              <div><label class="field-label" for="student-full-name">Full name</label><input class="field-input" id="student-full-name" required></div>
+              <div><label class="field-label" for="student-gender">Gender</label>
+                <select class="field-input" id="student-gender">
+                  <option value="Male">Male</option>
+                  <option value="Female">Female</option>
+                </select>
+              </div>
+              <div><label class="field-label" for="student-dob">Date of birth</label><input class="field-input" type="date" id="student-dob"></div>
+              <div><label class="field-label" for="student-class">Class</label><select class="field-input" id="student-class"></select></div>
+              <div><label class="field-label" for="student-arm">Arm</label><select class="field-input" id="student-arm"></select></div>
+              <div><label class="field-label" for="student-parent-email">Parent (existing, by email)</label><input class="field-input" id="student-parent-email" placeholder="parent@email.com — leave blank to link later"></div>
+              <div><label class="field-label" for="student-passport-file">Passport photo</label><input class="field-input" type="file" id="student-passport-file" accept="image/*"></div>
+            </div>
+            <p class="field-error hidden" id="student-form-error" role="alert"></p>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-primary">Register student</button>
+              <button type="button" class="btn btn-ghost-dark" id="student-form-cancel">Cancel</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="table-toolbar">
+          <input class="table-search" id="student-search" placeholder="Search students by name or admission no…">
+          <button type="button" class="btn btn-primary" id="student-add-btn">+ Add student</button>
+        </div>
+
+        <table class="data-table">
+          <thead><tr><th>Adm. No.</th><th>Name</th><th>Gender</th><th>Class / Arm</th><th>Parent</th><th></th></tr></thead>
+          <tbody id="student-table-body"><tr class="empty-row"><td colspan="6">Loading…</td></tr></tbody>
+        </table>
+        <div class="pagination-bar" id="student-pagination"></div>
+      </section>
+
+      <!-- ====================================================================
+           MY CLASS (Teacher roster)
+           ==================================================================== -->
+      <section id="view-myclass" class="content-view hidden">
+        <div class="view-header">
+          <h1>My Class</h1>
+          <p class="view-subheading" id="myclass-subheading">Students currently enrolled in your assigned arm(s).</p>
+        </div>
+        <div id="myclass-content"></div>
+      </section>
+
+      <!-- ====================================================================
+           ENTER RESULTS (Teacher)
+           ==================================================================== -->
+      <section id="view-results" class="content-view hidden">
+        <div class="view-header">
+          <h1>Enter Results</h1>
+          <p class="view-subheading">CA is out of 40, Exam is out of 60. Totals, grades, and remarks are calculated automatically — you never enter them.</p>
+        </div>
+
+        <div class="card">
+          <div class="form-grid">
+            <div>
+              <label class="field-label" for="results-arm-select">Class arm</label>
+              <select class="field-input" id="results-arm-select"></select>
+            </div>
+            <div>
+              <label class="field-label" for="results-subject-select">Subject</label>
+              <select class="field-input" id="results-subject-select"></select>
+            </div>
+          </div>
+        </div>
+
+        <div id="results-entry-notice"></div>
+
+        <table class="data-table" id="results-entry-table" style="display:none;">
+          <thead><tr><th>Student</th><th style="width:90px;">CA (40)</th><th style="width:90px;">Exam (60)</th><th style="width:70px;">Total</th><th>Status</th><th></th></tr></thead>
+          <tbody id="results-entry-body"></tbody>
+        </table>
+
+        <div class="form-actions" id="results-submit-row" style="display:none;">
+          <button type="button" class="btn btn-primary" id="results-submit-btn">Submit all drafts for approval</button>
+        </div>
+      </section>
+
+      <!-- ====================================================================
+           RESULT APPROVALS (Admin)
+           ==================================================================== -->
+      <section id="view-approvals" class="content-view hidden">
+        <div class="view-header">
+          <h1>Result Approvals</h1>
+          <p class="view-subheading">Review submitted scores per class arm and subject. Approving locks them in; rejecting sends them back to the teacher with a reason.</p>
+        </div>
+        <div id="approvals-content"></div>
+      </section>
+
+      <!-- ====================================================================
+           REPORT CARDS (Admin: generate + publish · Teacher/Parent: view)
+           ==================================================================== -->
+      <section id="view-reportcards" class="content-view hidden">
+        <div class="view-header">
+          <h1>Report Cards</h1>
+          <p class="view-subheading" id="reportcards-subheading">Generated from approved results. Nothing is visible to parents until published.</p>
+        </div>
+        <div id="reportcards-content"></div>
+      </section>
+
+      <!-- ====================================================================
+           PROMOTIONS & TRANSFERS (Admin)
+           ==================================================================== -->
+      <section id="view-promotions" class="content-view hidden">
+        <div class="view-header">
+          <h1>Promotions &amp; Transfers</h1>
+          <p class="view-subheading">First generate each student's Third Term report card from Report Cards, then come here to calculate their annual average across all three terms and approve or hold back promotion.</p>
+        </div>
+        <div id="promotions-content"></div>
+      </section>
+
+      <!-- ====================================================================
+           ATTENDANCE (Teacher entry · Admin/Parent view)
+           ==================================================================== -->
+      <section id="view-attendance" class="content-view hidden">
+        <div class="view-header">
+          <h1>Attendance</h1>
+          <p class="view-subheading" id="attendance-subheading"></p>
+        </div>
+        <div id="attendance-content"></div>
+      </section>
+
+      <!-- ====================================================================
+           ANNOUNCEMENTS (Admin CRUD · everyone views published ones)
+           ==================================================================== -->
+      <section id="view-announcements" class="content-view hidden">
+        <div class="view-header">
+          <h1>Announcements</h1>
+          <p class="view-subheading" id="announcements-subheading"></p>
+        </div>
+        <div id="announcements-content"></div>
+      </section>
+
+      <!-- ====================================================================
+           CALENDAR (Admin CRUD · everyone views)
+           ==================================================================== -->
+      <section id="view-calendar" class="content-view hidden">
+        <div class="view-header">
+          <h1>Academic Calendar</h1>
+          <p class="view-subheading" id="calendar-subheading"></p>
+        </div>
+        <div id="calendar-content"></div>
+      </section>
+
+      <!-- ====================================================================
+           AUDIT LOG (Admin)
+           ==================================================================== -->
+      <section id="view-auditlog" class="content-view hidden">
+        <div class="view-header">
+          <h1>Audit Log</h1>
+          <p class="view-subheading">Every insert, update, and delete on results, students, staff, users, and promotions — recorded by a database trigger, not application code.</p>
+        </div>
+        <div id="auditlog-content"></div>
+      </section>
+
+      <!-- ====================================================================
+           SCHOOL SETTINGS (Admin)
+           ==================================================================== -->
+      <section id="view-settings" class="content-view hidden">
+        <div class="view-header">
+          <h1>School Settings</h1>
+          <p class="view-subheading">Edit identity/branding anytime — changes apply app-wide immediately. Export core data for backup below.</p>
+        </div>
+        <div id="settings-content"></div>
+      </section>
+
+      <!-- All build-order modules are now represented. -->
+    </main>
+  </div>
+</div>
+
+<!-- ==========================================================================
+     REPORT CARD PREVIEW / PRINT OVERLAY — shared by admin (preview before
+     publish), teacher (view their class's cards), and parent (view + print
+     published cards). Only .print-report-card is visible when printing,
+     per the print stylesheet in styles.css.
+     ========================================================================== -->
+<div id="report-card-overlay" class="report-card-overlay hidden">
+  <div class="report-card-toolbar no-print">
+    <button type="button" class="btn btn-ghost-dark" id="close-report-card-btn">✕ Close</button>
+    <button type="button" class="btn btn-primary" id="print-report-card-btn">Print / Save as PDF</button>
+  </div>
+
+  <div id="report-card-admin-panel" class="print-report-card no-print hidden" style="margin-bottom:16px;">
+    <h3 style="font-size:15px;margin-bottom:12px;">Comments &amp; term-end details (shown on the report card, editable before publishing)</h3>
+    <label class="field-label" for="rc-general-conduct">General conduct</label>
+    <textarea class="field-input field-textarea" id="rc-general-conduct" rows="2"></textarea>
+    <label class="field-label" for="rc-teacher-comment">Class teacher's remark</label>
+    <textarea class="field-input field-textarea" id="rc-teacher-comment" rows="2"></textarea>
+    <label class="field-label" for="rc-head-comment">Head teacher's remark</label>
+    <textarea class="field-input field-textarea" id="rc-head-comment" rows="2"></textarea>
+    <div class="field-row">
+      <div><label class="field-label" for="rc-next-term-begins">Next term begins</label><input class="field-input" type="date" id="rc-next-term-begins"></div>
+      <div><label class="field-label" for="rc-next-term-fees">Next term school fees</label><input class="field-input" id="rc-next-term-fees" placeholder="e.g. ₦85,000"></div>
+    </div>
+    <div class="form-actions">
+      <button type="button" class="btn btn-ghost-dark" id="rc-save-comments-btn">Save comments</button>
+      <button type="button" class="btn btn-primary" id="rc-publish-btn">Publish this report card</button>
+    </div>
+  </div>
+
+  <div id="report-card-print-area" class="print-report-card"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="script.js"></script>
+</body>
+</html>
