@@ -2392,6 +2392,40 @@ async function renderParentReportCardsScreen(container) {
    ---------------------------------------------------------------------------- */
 let currentPreviewCardId = null;
 
+// Remembers the app's normal mobile viewport so it can be restored when the
+// report card closes. Read once, lazily, the first time we need it.
+let ORIGINAL_VIEWPORT_CONTENT = null;
+function getViewportMeta() {
+  return document.querySelector('meta[name="viewport"]');
+}
+
+// Phones/small tablets only — desktops and laptops should never be affected.
+// A simple width check is more reliable than UA-sniffing across browsers.
+function isMobileViewport() {
+  return window.innerWidth <= 860;
+}
+
+// "Force desktop mode" for the report card only: swap the viewport meta tag
+// from `width=device-width` to a fixed pixel width. The phone then lays the
+// whole page out as if it were that wide (same effect as Chrome's "Desktop
+// site" toggle) and lets the user pinch-zoom/pan to read it, instead of us
+// trying to squeeze a ledger-style table into 360px. Parents only — admin
+// and teacher keep the normal responsive layout on their own phones.
+function forceDesktopViewportForReportCard() {
+  if (appState.user.role !== 'parent' || !isMobileViewport()) return;
+  const meta = getViewportMeta();
+  if (!meta) return;
+  ORIGINAL_VIEWPORT_CONTENT = meta.getAttribute('content');
+  meta.setAttribute('content', 'width=1024');
+}
+
+function restoreNormalViewport() {
+  if (ORIGINAL_VIEWPORT_CONTENT === null) return;
+  const meta = getViewportMeta();
+  if (meta) meta.setAttribute('content', ORIGINAL_VIEWPORT_CONTENT);
+  ORIGINAL_VIEWPORT_CONTENT = null;
+}
+
 async function openReportCardPreview(reportCardId) {
   showLoading();
   try {
@@ -2420,6 +2454,7 @@ async function openReportCardPreview(reportCardId) {
       adminPanel.classList.add('hidden');
     }
 
+    forceDesktopViewportForReportCard();
     document.getElementById('report-card-overlay').classList.remove('hidden');
   } catch (err) {
     showToast(err.message || 'Could not load report card.', 'error');
@@ -2431,6 +2466,7 @@ async function openReportCardPreview(reportCardId) {
 function closeReportCardPreview() {
   document.getElementById('report-card-overlay').classList.add('hidden');
   currentPreviewCardId = null;
+  restoreNormalViewport();
 }
 
 // TERM_ORDER lets us know which terms come "at or before" the term being
