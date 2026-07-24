@@ -473,9 +473,9 @@ input { font-family: inherit; }
   background: #6b6558;
   z-index: 1200;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 24px;
 }
-.no-print
 .report-card-toolbar {
   max-width: 780px;
   margin: 0 auto 16px;
@@ -492,6 +492,15 @@ input { font-family: inherit; }
   box-shadow: var(--shadow-card);
   position: relative;
 }
+
+/* Lets the subjects table scroll horizontally on its own when it's wider
+   than the card, instead of overflowing/clipping the whole page. */
+.rc-table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  margin-bottom: 20px;
+}
+.rc-table-scroll .rc-subjects-table { margin-bottom: 0; }
 
 .rc-watermark {
   position: absolute;
@@ -565,6 +574,7 @@ input { font-family: inherit; }
 
 .rc-subjects-table {
   width: 100%;
+  min-width: 480px;
   border-collapse: collapse;
   font-size: 12.5px;
   margin-bottom: 20px;
@@ -612,6 +622,28 @@ input { font-family: inherit; }
 @media print {
   .report-card-overlay { position: static; background: none; padding: 0; }
   .print-report-card { box-shadow: none; padding: 20px; max-width: 100%; }
+}
+
+/* ============================================================================
+   REPORT CARD — MOBILE
+   ============================================================================ */
+@media (max-width: 640px) {
+  .report-card-overlay { padding: 10px; }
+  .report-card-toolbar { margin-bottom: 12px; }
+  .print-report-card { padding: 24px 16px; }
+
+  .rc-header { flex-wrap: wrap; gap: 12px; }
+  .rc-header .rc-title { margin-left: 0; text-align: left; }
+
+  .rc-report-title { flex-direction: column; gap: 4px; }
+
+  .rc-student-block { flex-direction: column; }
+  .rc-passport { width: 72px; height: 86px; }
+  .rc-student-grid { grid-template-columns: 1fr; gap: 2px 0; font-size: 13px; }
+
+  .rc-summary { grid-template-columns: 1fr 1fr; }
+
+  .rc-signatures { grid-template-columns: 1fr; gap: 30px; }
 }
 
 .dashboard-stat-grid {
