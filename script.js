@@ -52,26 +52,20 @@ const NAV_BY_ROLE = {
     { key: 'approvals', label: 'Result Approvals', icon: '◆' },
     { key: 'reportcards', label: 'Report Cards', icon: '◆' },
     { key: 'promotions', label: 'Promotions & Transfers', icon: '◆' },
-    { key: 'attendance', label: 'Attendance', icon: '◆' },
     { key: 'announcements', label: 'Announcements', icon: '◆' },
-    { key: 'calendar', label: 'Calendar', icon: '◆' },
-    { key: 'auditlog', label: 'Audit Log', icon: '◆' },
     { key: 'settings', label: 'School Settings', icon: '◆' },
   ],
   teacher: [
     { key: 'dashboard', label: 'Dashboard', icon: '◆' },
     { key: 'myclass', label: 'My Class', icon: '◆' },
     { key: 'results', label: 'Enter Results', icon: '◆' },
-    { key: 'attendance', label: 'Attendance', icon: '◆' },
     { key: 'reportcards', label: 'Report Cards', icon: '◆' },
     { key: 'announcements', label: 'Announcements', icon: '◆' },
   ],
   parent: [
     { key: 'dashboard', label: 'Dashboard', icon: '◆' },
     { key: 'reportcards', label: 'Report Cards', icon: '◆' },
-    { key: 'attendance', label: 'Attendance', icon: '◆' },
     { key: 'announcements', label: 'Announcements', icon: '◆' },
-    { key: 'calendar', label: 'Calendar', icon: '◆' },
   ],
 };
 
@@ -246,6 +240,59 @@ async function loadActiveSessionAndTerm() {
   });
 }
 
+/* ----------------------------------------------------------------------------
+   5b. ACTIVE TERM SYNC (bugfix)
+   BUG: appState.activeTermId/activeSessionId were only ever set at login and
+   in the admin's own "Make Active" button handler — so any *other* already
+   signed-in tab (e.g. a teacher's) kept the OLD term id in memory forever.
+   Every term-scoped screen (Results, Report Cards, Promotions,
+   Dashboard, Settings) reads/writes against appState.activeTermId, so a
+   teacher who was signed in before the switch would keep seeing/editing the
+   PREVIOUS term's enrollment+results — which looks exactly like "this
+   term's boxes are pre-filled with last term's scores," because it's
+   actually still last term's screen.
+
+   Fix has two layers:
+   1. A Supabase Realtime subscription so every open tab re-syncs the moment
+      any admin flips the active session/term, anywhere.
+   2. A cheap resync-on-navigate safety net (in dispatchViewLoad below) that
+      re-checks the real active term before loading any term-scoped screen,
+      so correctness doesn't depend on the realtime channel staying connected.
+   ---------------------------------------------------------------------------- */
+const TERM_DEPENDENT_VIEWS = ['dashboard', 'students', 'results', 'approvals', 'reportcards', 'promotions', 'settings'];
+
+let termChangesChannel = null;
+
+function subscribeToActiveTermChanges() {
+  if (termChangesChannel) return; // already subscribed for this session
+  termChangesChannel = supabaseClient
+    .channel('active-term-changes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'terms' }, handleActiveTermOrSessionChange)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'sessions' }, handleActiveTermOrSessionChange)
+    .subscribe();
+}
+
+function unsubscribeFromActiveTermChanges() {
+  if (termChangesChannel) {
+    supabaseClient.removeChannel(termChangesChannel);
+    termChangesChannel = null;
+  }
+}
+
+async function handleActiveTermOrSessionChange() {
+  const previousTermId = appState.activeTermId;
+  const previousSessionId = appState.activeSessionId;
+  await loadActiveSessionAndTerm();
+  renderTopbarContext();
+
+  if (appState.activeTermId !== previousTermId || appState.activeSessionId !== previousSessionId) {
+    if (TERM_DEPENDENT_VIEWS.includes(appState.currentView)) {
+      dispatchViewLoad(appState.currentView);
+    }
+    showToast('The active academic term changed — this screen has refreshed to match.', 'default');
+  }
+}
+
 function applySchoolBranding(settings) {
   if (settings.school_name) {
     document.getElementById('login-school-name').textContent = settings.school_name;
@@ -262,6 +309,7 @@ function applySchoolBranding(settings) {
 
 async function handleLogout() {
   showLoading();
+  unsubscribeFromActiveTermChanges();
   await supabaseClient.auth.signOut();
   setState({ user: null, authUser: null, currentView: 'login' });
   hideLoading();
@@ -391,7 +439,9 @@ function enterAppShell() {
   renderSidebar();
   renderUserSummary();
   renderTopbarContext();
+  subscribeToActiveTermChanges();
   navigateTo('dashboard');
+  if (appState.user.role === 'admin') checkSessionRolloverPrompt();
 }
 
 /* ----------------------------------------------------------------------------
@@ -479,14 +529,18 @@ const VIEW_LOAD_HANDLERS = {
   approvals: loadApprovalsScreen,
   reportcards: loadReportCardsScreen,
   promotions: loadPromotionsScreen,
-  attendance: loadAttendanceScreen,
   announcements: loadAnnouncementsScreen,
-  calendar: loadCalendarScreen,
-  auditlog: loadAuditLogScreen,
   settings: loadSettingsScreen,
 };
 
-function dispatchViewLoad(viewKey) {
+async function dispatchViewLoad(viewKey) {
+  // Safety net: even if the realtime subscription above is disconnected or
+  // still connecting, never let a term-scoped screen load against a stale
+  // appState.activeTermId — always re-check the real current term first.
+  if (TERM_DEPENDENT_VIEWS.includes(viewKey)) {
+    await loadActiveSessionAndTerm();
+    renderTopbarContext();
+  }
   const handler = VIEW_LOAD_HANDLERS[viewKey];
   if (handler) handler();
 }
@@ -659,7 +713,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  /* ---- Step 3: Classes & Arms -------------------------------------------- */
+  /* ---- Step 3: Classes ---------------------------------------------------- */
   document.getElementById('wizard-add-class-row').addEventListener('click', addWizardClassRow);
 
   document.getElementById('wizard-step-3').addEventListener('submit', async (e) => {
@@ -667,30 +721,26 @@ document.addEventListener('DOMContentLoaded', () => {
     showLoading();
     try {
       const rows = Array.from(document.querySelectorAll('#wizard-class-rows .wizard-repeat-row'))
-        .map(row => ({
-          className: row.querySelector('[data-field="class-name"]').value.trim(),
-          arms: row.querySelector('[data-field="class-arms"]').value.trim(),
-        }))
-        .filter(r => r.className);
+        .map(row => row.querySelector('[data-field="class-name"]').value.trim())
+        .filter(Boolean);
 
       if (rows.length === 0) throw new Error('Add at least one class before continuing.');
 
       for (let i = 0; i < rows.length; i++) {
-        const { className, arms } = rows[i];
         const { data: cls, error: clsErr } = await supabaseClient
           .from('classes')
-          .insert({ name: className, sort_order: i })
+          .insert({ name: rows[i], sort_order: i })
           .select()
           .single();
         if (clsErr) throw clsErr;
 
-        const armNames = arms ? arms.split(',').map(a => a.trim()).filter(Boolean) : ['A'];
-        const armRows = armNames.map(name => ({ class_id: cls.id, name }));
-        const { error: armErr } = await supabaseClient.from('class_arms').insert(armRows);
+        // Every class gets a single hidden arm behind the scenes — the app
+        // doesn't expose "arms" to the user at all.
+        const { error: armErr } = await supabaseClient.from('class_arms').insert({ class_id: cls.id, name: 'A' });
         if (armErr) throw armErr;
       }
 
-      showToast('Classes and arms saved.', 'success');
+      showToast('Classes saved.', 'success');
       goToWizardStep(4);
     } catch (err) {
       showToast(err.message || 'Could not save classes.', 'error');
@@ -801,7 +851,6 @@ function addWizardClassRow() {
   row.className = 'wizard-repeat-row';
   row.innerHTML = `
     <input class="field-input" data-field="class-name" placeholder="Class name, e.g. Primary 1">
-    <input class="field-input" data-field="class-arms" placeholder="Arms, e.g. A, B, C">
     <button type="button" class="wizard-remove-row-btn">Remove</button>
   `;
   row.querySelector('.wizard-remove-row-btn').addEventListener('click', () => row.remove());
@@ -934,12 +983,15 @@ async function loadStaffScreen() {
     .map(s => {
       const arm = (arms || []).find(a => a.class_teacher_id === s.id);
       return {
+        id: s.id,
         pendingId: null,
         full_name: s.users.full_name,
         email: s.users.email,
+        phone: s.users.phone,
         role: s.users.role,
         staff_number: s.staff_number,
-        assigned_arm: arm ? `${arm.classes.name} ${arm.name}` : '—',
+        employed_date: s.employed_date,
+        assigned_arm: arm ? arm.classes.name : '—',
         status: 'active',
       };
     });
@@ -951,11 +1003,14 @@ async function loadStaffScreen() {
     .eq('claimed', false);
 
   const pending = (pendingRows || []).map(p => ({
+    id: null,
     pendingId: p.id,
     full_name: p.full_name,
     email: p.email,
+    phone: p.phone,
     role: p.role,
     staff_number: p.staff_number,
+    employed_date: p.employed_date,
     assigned_arm: '—',
     status: 'pending',
   }));
@@ -963,6 +1018,8 @@ async function loadStaffScreen() {
   staffCache = [...activeRows, ...pending];
   renderStaffTable(staffCache);
 }
+
+let staffEditContext = null; // { id, pendingId } of row currently being edited, or null when adding
 
 function renderStaffTable(rows) {
   const { pageRows } = paginate(rows, staffPage, 'staff-pagination', (p) => { staffPage = p; renderStaffTable(rows); });
@@ -979,9 +1036,21 @@ function renderStaffTable(rows) {
       <td>${escapeHtml(r.staff_number || '—')}</td>
       <td>${escapeHtml(r.assigned_arm)}</td>
       <td><span class="badge ${r.status === 'active' ? 'badge-success' : 'badge-gold'}">${r.status === 'active' ? 'Active' : 'Pending activation'}</span></td>
-      <td>${r.pendingId ? `<button type="button" class="icon-btn icon-btn-danger" data-cancel-pending-staff="${r.pendingId}">Cancel invite</button>` : ''}</td>
+      <td>
+        <button type="button" class="icon-btn" data-edit-staff="${r.id || ''}" data-edit-staff-pending="${r.pendingId || ''}">Edit</button>
+        ${r.pendingId ? `<button type="button" class="icon-btn icon-btn-danger" data-cancel-pending-staff="${r.pendingId}">Cancel invite</button>` : ''}
+      </td>
     </tr>
   `).join('');
+
+  tbody.querySelectorAll('[data-edit-staff]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.editStaff || null;
+      const pendingId = btn.dataset.editStaffPending || null;
+      const row = staffCache.find(r => (id && r.id === id) || (pendingId && r.pendingId === pendingId));
+      if (row) openStaffEditForm(row);
+    });
+  });
 
   tbody.querySelectorAll('[data-cancel-pending-staff]').forEach(btn => {
     btn.addEventListener('click', async () => {
@@ -1000,10 +1069,46 @@ function renderStaffTable(rows) {
   });
 }
 
+function openStaffEditForm(row) {
+  staffEditContext = { id: row.id, pendingId: row.pendingId };
+  document.getElementById('staff-full-name').value = row.full_name || '';
+  document.getElementById('staff-email').value = row.email || '';
+  document.getElementById('staff-phone').value = row.phone || '';
+  document.getElementById('staff-role').value = row.role || 'teacher';
+  document.getElementById('staff-number').value = row.staff_number || '';
+  document.getElementById('staff-employed-date').value = row.employed_date || '';
+
+  const emailInput = document.getElementById('staff-email');
+  const note = document.getElementById('staff-form-note');
+  if (row.status === 'active') {
+    emailInput.setAttribute('readonly', 'readonly');
+    note.textContent = "Email can't be changed here for an active account since it's tied to their login — other fields update immediately.";
+  } else {
+    emailInput.removeAttribute('readonly');
+    note.textContent = 'No password needed here — they\'ll set their own the first time they sign in, using this email, via "Activate your account" on the login screen.';
+  }
+
+  document.getElementById('staff-form-heading').textContent = 'Edit staff or teacher';
+  document.getElementById('staff-form-submit').textContent = 'Save changes';
+  toggleInlineForm('staff-form-card', true);
+}
+
+function resetStaffForm() {
+  staffEditContext = null;
+  document.getElementById('staff-form').reset();
+  document.getElementById('staff-email').removeAttribute('readonly');
+  document.getElementById('staff-form-heading').textContent = 'Add staff or teacher';
+  document.getElementById('staff-form-submit').textContent = 'Save';
+  document.getElementById('staff-form-note').textContent = 'No password needed here — they\'ll set their own the first time they sign in, using this email, via "Activate your account" on the login screen.';
+}
+
 document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('staff-add-btn').addEventListener('click', () => toggleInlineForm('staff-form-card', true));
+  document.getElementById('staff-add-btn').addEventListener('click', () => {
+    resetStaffForm();
+    toggleInlineForm('staff-form-card', true);
+  });
   document.getElementById('staff-form-cancel').addEventListener('click', () => {
-    document.getElementById('staff-form').reset();
+    resetStaffForm();
     toggleInlineForm('staff-form-card', false);
   });
   document.getElementById('staff-search').addEventListener('input', (e) => {
@@ -1020,26 +1125,51 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       const fullName = document.getElementById('staff-full-name').value.trim();
       const email = document.getElementById('staff-email').value.trim();
-      const { error } = await supabaseClient.from('pending_accounts').insert({
-        full_name: fullName,
-        email: email,
-        phone: document.getElementById('staff-phone').value.trim(),
-        role: document.getElementById('staff-role').value,
-        staff_number: document.getElementById('staff-number').value.trim() || null,
-        employed_date: document.getElementById('staff-employed-date').value || null,
-        created_by: appState.user.id,
-      });
-      if (error) throw error;
+      const phone = document.getElementById('staff-phone').value.trim();
+      const role = document.getElementById('staff-role').value;
+      const staffNumber = document.getElementById('staff-number').value.trim() || null;
+      const employedDate = document.getElementById('staff-employed-date').value || null;
 
-      sendAppsScriptEmail({
-        type: 'notify',
-        to: email,
-        subject: `You've been added to ${appState.schoolSettings?.school_name || 'the school'}'s system`,
-        body: `Hello ${fullName},\n\nAn account has been set up for you on ${appState.schoolSettings?.school_name || 'the school'}'s Result Management System.\n\nTo activate it, go to the login page, click "Staff or parent? Activate your account," and enter this email address (${email}) along with a password of your choosing.\n\nIf you weren't expecting this, please contact the school administrator.`,
-      });
+      if (staffEditContext && staffEditContext.id) {
+        // Editing an active staff/teacher account
+        const { error: userErr } = await supabaseClient
+          .from('users').update({ full_name: fullName, phone, role }).eq('id', staffEditContext.id);
+        if (userErr) throw userErr;
+        const { error: staffErr } = await supabaseClient
+          .from('staff').update({ staff_number: staffNumber, employed_date: employedDate }).eq('id', staffEditContext.id);
+        if (staffErr) throw staffErr;
+        showToast('Staff details updated.', 'success');
+      } else if (staffEditContext && staffEditContext.pendingId) {
+        // Editing a not-yet-activated invite
+        const { error } = await supabaseClient.from('pending_accounts').update({
+          full_name: fullName, email, phone, role, staff_number: staffNumber, employed_date: employedDate,
+        }).eq('id', staffEditContext.pendingId);
+        if (error) throw error;
+        showToast('Invite details updated.', 'success');
+      } else {
+        // Adding a new staff/teacher
+        const { error } = await supabaseClient.from('pending_accounts').insert({
+          full_name: fullName,
+          email: email,
+          phone: phone,
+          role: role,
+          staff_number: staffNumber,
+          employed_date: employedDate,
+          created_by: appState.user.id,
+        });
+        if (error) throw error;
 
-      showToast('Saved. They can now activate their account using this email.', 'success');
-      document.getElementById('staff-form').reset();
+        sendAppsScriptEmail({
+          type: 'notify',
+          to: email,
+          subject: `You've been added to ${appState.schoolSettings?.school_name || 'the school'}'s system`,
+          body: `Hello ${fullName},\n\nAn account has been set up for you on ${appState.schoolSettings?.school_name || 'the school'}'s Result Management System.\n\nTo activate it, go to the login page, click "Staff or parent? Activate your account," and enter this email address (${email}) along with a password of your choosing.\n\nIf you weren't expecting this, please contact the school administrator.`,
+        });
+
+        showToast('Saved. They can now activate their account using this email.', 'success');
+      }
+
+      resetStaffForm();
       toggleInlineForm('staff-form-card', false);
       loadStaffScreen();
     } catch (err) {
@@ -1064,7 +1194,7 @@ async function loadParentsScreen() {
 
   const { data: parentRows, error } = await supabaseClient
     .from('parents')
-    .select('id, users(full_name, email, phone)');
+    .select('id, address, users(full_name, email, phone)');
   if (error) { showToast(error.message, 'error'); return; }
 
   const { data: students } = await supabaseClient.from('students').select('parent_id');
@@ -1074,10 +1204,12 @@ async function loadParentsScreen() {
   const activeRows = (parentRows || [])
     .filter(p => p.users)
     .map(p => ({
+      id: p.id,
       pendingId: null,
       full_name: p.users.full_name,
       email: p.users.email,
       phone: p.users.phone,
+      address: p.address,
       children: childCounts[p.id] || 0,
       status: 'active',
     }));
@@ -1089,10 +1221,12 @@ async function loadParentsScreen() {
     .eq('claimed', false);
 
   const pending = (pendingRows || []).map(p => ({
+    id: null,
     pendingId: p.id,
     full_name: p.full_name,
     email: p.email,
     phone: p.phone,
+    address: p.address,
     children: 0,
     status: 'pending',
   }));
@@ -1100,6 +1234,8 @@ async function loadParentsScreen() {
   parentCache = [...activeRows, ...pending];
   renderParentTable(parentCache);
 }
+
+let parentEditContext = null; // { id, pendingId } of row currently being edited, or null when adding
 
 function renderParentTable(rows) {
   const { pageRows } = paginate(rows, parentPage, 'parent-pagination', (p) => { parentPage = p; renderParentTable(rows); });
@@ -1115,9 +1251,21 @@ function renderParentTable(rows) {
       <td>${escapeHtml(r.phone || '—')}</td>
       <td>${r.children}</td>
       <td><span class="badge ${r.status === 'active' ? 'badge-success' : 'badge-gold'}">${r.status === 'active' ? 'Active' : 'Pending activation'}</span></td>
-      <td>${r.pendingId ? `<button type="button" class="icon-btn icon-btn-danger" data-cancel-pending-parent="${r.pendingId}">Cancel invite</button>` : ''}</td>
+      <td>
+        <button type="button" class="icon-btn" data-edit-parent="${r.id || ''}" data-edit-parent-pending="${r.pendingId || ''}">Edit</button>
+        ${r.pendingId ? `<button type="button" class="icon-btn icon-btn-danger" data-cancel-pending-parent="${r.pendingId}">Cancel invite</button>` : ''}
+      </td>
     </tr>
   `).join('');
+
+  tbody.querySelectorAll('[data-edit-parent]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.editParent || null;
+      const pendingId = btn.dataset.editParentPending || null;
+      const row = parentCache.find(r => (id && r.id === id) || (pendingId && r.pendingId === pendingId));
+      if (row) openParentEditForm(row);
+    });
+  });
 
   tbody.querySelectorAll('[data-cancel-pending-parent]').forEach(btn => {
     btn.addEventListener('click', async () => {
@@ -1136,10 +1284,44 @@ function renderParentTable(rows) {
   });
 }
 
+function openParentEditForm(row) {
+  parentEditContext = { id: row.id, pendingId: row.pendingId };
+  document.getElementById('parent-full-name').value = row.full_name || '';
+  document.getElementById('parent-email').value = row.email || '';
+  document.getElementById('parent-phone').value = row.phone || '';
+  document.getElementById('parent-address').value = row.address || '';
+
+  const emailInput = document.getElementById('parent-email');
+  const note = document.getElementById('parent-form-note');
+  if (row.status === 'active') {
+    emailInput.setAttribute('readonly', 'readonly');
+    note.textContent = "Email can't be changed here for an active account since it's tied to their login — other fields update immediately.";
+  } else {
+    emailInput.removeAttribute('readonly');
+    note.textContent = 'No password needed here — they\'ll set their own the first time they sign in, using this email, via "Activate your account" on the login screen.';
+  }
+
+  document.getElementById('parent-form-heading').textContent = 'Edit parent';
+  document.getElementById('parent-form-submit').textContent = 'Save changes';
+  toggleInlineForm('parent-form-card', true);
+}
+
+function resetParentForm() {
+  parentEditContext = null;
+  document.getElementById('parent-form').reset();
+  document.getElementById('parent-email').removeAttribute('readonly');
+  document.getElementById('parent-form-heading').textContent = 'Add parent';
+  document.getElementById('parent-form-submit').textContent = 'Save';
+  document.getElementById('parent-form-note').textContent = 'No password needed here — they\'ll set their own the first time they sign in, using this email, via "Activate your account" on the login screen.';
+}
+
 document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('parent-add-btn').addEventListener('click', () => toggleInlineForm('parent-form-card', true));
+  document.getElementById('parent-add-btn').addEventListener('click', () => {
+    resetParentForm();
+    toggleInlineForm('parent-form-card', true);
+  });
   document.getElementById('parent-form-cancel').addEventListener('click', () => {
-    document.getElementById('parent-form').reset();
+    resetParentForm();
     toggleInlineForm('parent-form-card', false);
   });
   document.getElementById('parent-search').addEventListener('input', (e) => {
@@ -1156,25 +1338,48 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       const fullName = document.getElementById('parent-full-name').value.trim();
       const email = document.getElementById('parent-email').value.trim();
-      const { error } = await supabaseClient.from('pending_accounts').insert({
-        full_name: fullName,
-        email: email,
-        phone: document.getElementById('parent-phone').value.trim(),
-        address: document.getElementById('parent-address').value.trim(),
-        role: 'parent',
-        created_by: appState.user.id,
-      });
-      if (error) throw error;
+      const phone = document.getElementById('parent-phone').value.trim();
+      const address = document.getElementById('parent-address').value.trim();
 
-      sendAppsScriptEmail({
-        type: 'notify',
-        to: email,
-        subject: `You've been added to ${appState.schoolSettings?.school_name || 'the school'}'s system`,
-        body: `Hello ${fullName},\n\nA parent account has been set up for you on ${appState.schoolSettings?.school_name || 'the school'}'s Result Management System, so you can view your child's report cards, attendance, and school announcements.\n\nTo activate it, go to the login page, click "Staff or parent? Activate your account," and enter this email address (${email}) along with a password of your choosing.\n\nIf you weren't expecting this, please contact the school administrator.`,
-      });
+      if (parentEditContext && parentEditContext.id) {
+        // Editing an active parent account
+        const { error: userErr } = await supabaseClient
+          .from('users').update({ full_name: fullName, phone }).eq('id', parentEditContext.id);
+        if (userErr) throw userErr;
+        const { error: parentErr } = await supabaseClient
+          .from('parents').update({ address }).eq('id', parentEditContext.id);
+        if (parentErr) throw parentErr;
+        showToast('Parent details updated.', 'success');
+      } else if (parentEditContext && parentEditContext.pendingId) {
+        // Editing a not-yet-activated invite
+        const { error } = await supabaseClient.from('pending_accounts').update({
+          full_name: fullName, email, phone, address,
+        }).eq('id', parentEditContext.pendingId);
+        if (error) throw error;
+        showToast('Invite details updated.', 'success');
+      } else {
+        // Adding a new parent
+        const { error } = await supabaseClient.from('pending_accounts').insert({
+          full_name: fullName,
+          email: email,
+          phone: phone,
+          address: address,
+          role: 'parent',
+          created_by: appState.user.id,
+        });
+        if (error) throw error;
 
-      showToast('Saved. They can now activate their account using this email.', 'success');
-      document.getElementById('parent-form').reset();
+        sendAppsScriptEmail({
+          type: 'notify',
+          to: email,
+          subject: `You've been added to ${appState.schoolSettings?.school_name || 'the school'}'s system`,
+          body: `Hello ${fullName},\n\nA parent account has been set up for you on ${appState.schoolSettings?.school_name || 'the school'}'s Result Management System, so you can view your child's report cards and school announcements.\n\nTo activate it, go to the login page, click "Staff or parent? Activate your account," and enter this email address (${email}) along with a password of your choosing.\n\nIf you weren't expecting this, please contact the school administrator.`,
+        });
+
+        showToast('Saved. They can now activate their account using this email.', 'success');
+      }
+
+      resetParentForm();
       toggleInlineForm('parent-form-card', false);
       loadParentsScreen();
     } catch (err) {
@@ -1212,30 +1417,24 @@ function renderClassesList() {
     container.innerHTML = `<p class="view-subheading">No classes yet — add one above.</p>`;
     return;
   }
-  container.innerHTML = classesWithArmsCache.map(c => `
+  container.innerHTML = classesWithArmsCache.map(c => {
+    const arm = c.arms[0]; // every class has exactly one hidden arm behind the scenes
+    return `
     <div class="card class-card">
       <div class="class-card-header">
         <h3>${escapeHtml(c.name)}</h3>
         <button type="button" class="icon-btn icon-btn-danger" data-delete-class="${c.id}">Delete class</button>
       </div>
-      <div>
-        ${c.arms.map(a => `
-          <span class="class-arm-chip">
-            Arm ${escapeHtml(a.name)}
-            <select data-assign-arm="${a.id}" style="border:none;background:none;font-size:12.5px;">
-              <option value="">— assign teacher —</option>
-              ${teacherOptionsCache.map(t => `<option value="${t.id}" ${t.id === a.class_teacher_id ? 'selected' : ''}>${escapeHtml(t.users.full_name)}</option>`).join('')}
-            </select>
-            <button type="button" data-delete-arm="${a.id}" title="Remove arm">✕</button>
-          </span>
-        `).join('')}
-      </div>
-      <div class="form-actions">
-        <input class="field-input" style="max-width:160px;" placeholder="New arm name" data-new-arm-input="${c.id}">
-        <button type="button" class="btn btn-ghost-dark" data-add-arm="${c.id}">+ Add arm</button>
-      </div>
+      ${arm ? `
+        <label class="field-label" for="class-teacher-${arm.id}">Class teacher</label>
+        <select class="field-input" style="max-width:280px;" id="class-teacher-${arm.id}" data-assign-arm="${arm.id}">
+          <option value="">— assign teacher —</option>
+          ${teacherOptionsCache.map(t => `<option value="${t.id}" ${t.id === arm.class_teacher_id ? 'selected' : ''}>${escapeHtml(t.users.full_name)}</option>`).join('')}
+        </select>
+      ` : ''}
     </div>
-  `).join('');
+  `;
+  }).join('');
 
   container.querySelectorAll('[data-assign-arm]').forEach(sel => {
     sel.addEventListener('change', async () => {
@@ -1255,44 +1454,9 @@ function renderClassesList() {
     });
   });
 
-  container.querySelectorAll('[data-add-arm]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const classId = btn.dataset.addArm;
-      const input = container.querySelector(`[data-new-arm-input="${classId}"]`);
-      const name = input.value.trim();
-      if (!name) { showToast('Enter an arm name first.', 'error'); return; }
-      showLoading();
-      try {
-        const { error } = await supabaseClient.from('class_arms').insert({ class_id: classId, name });
-        if (error) throw error;
-        loadClassesScreen();
-      } catch (err) {
-        showToast(err.message || 'Could not add arm.', 'error');
-      } finally {
-        hideLoading();
-      }
-    });
-  });
-
-  container.querySelectorAll('[data-delete-arm]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      if (!confirm('Remove this arm? This cannot be undone if students are enrolled in it.')) return;
-      showLoading();
-      try {
-        const { error } = await supabaseClient.from('class_arms').delete().eq('id', btn.dataset.deleteArm);
-        if (error) throw error;
-        loadClassesScreen();
-      } catch (err) {
-        showToast(err.message || 'Could not remove arm.', 'error');
-      } finally {
-        hideLoading();
-      }
-    });
-  });
-
   container.querySelectorAll('[data-delete-class]').forEach(btn => {
     btn.addEventListener('click', async () => {
-      if (!confirm('Delete this entire class, including all its arms? This cannot be undone.')) return;
+      if (!confirm('Delete this entire class? This cannot be undone.')) return;
       showLoading();
       try {
         const { error } = await supabaseClient.from('classes').delete().eq('id', btn.dataset.deleteClass);
@@ -1340,7 +1504,6 @@ function renderSubjectsChips() {
 document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('add-class-btn').addEventListener('click', async () => {
     const name = document.getElementById('new-class-name').value.trim();
-    const armsRaw = document.getElementById('new-class-arms').value.trim();
     if (!name) { showToast('Enter a class name.', 'error'); return; }
     showLoading();
     try {
@@ -1351,14 +1514,14 @@ document.addEventListener('DOMContentLoaded', () => {
         .single();
       if (clsErr) throw clsErr;
 
-      const armNames = armsRaw ? armsRaw.split(',').map(a => a.trim()).filter(Boolean) : ['A'];
+      // Every class gets a single hidden arm named "A" — the app never
+      // exposes "arms" to the user, this is purely internal plumbing.
       const { error: armErr } = await supabaseClient
         .from('class_arms')
-        .insert(armNames.map(n => ({ class_id: cls.id, name: n })));
+        .insert({ class_id: cls.id, name: 'A' });
       if (armErr) throw armErr;
 
       document.getElementById('new-class-name').value = '';
-      document.getElementById('new-class-arms').value = '';
       showToast('Class added.', 'success');
       loadClassesScreen();
     } catch (err) {
@@ -1406,13 +1569,6 @@ async function populateStudentClassArmSelects() {
   await refreshClassesWithArmsCache();
   const classSelect = document.getElementById('student-class');
   classSelect.innerHTML = classesWithArmsCache.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
-  populateStudentArmSelect(classesWithArmsCache[0] ? classesWithArmsCache[0].id : null);
-}
-
-function populateStudentArmSelect(classId) {
-  const armSelect = document.getElementById('student-arm');
-  const cls = classesWithArmsCache.find(c => c.id === classId);
-  armSelect.innerHTML = cls ? cls.arms.map(a => `<option value="${a.id}">${escapeHtml(a.name)}</option>`).join('') : '';
 }
 
 async function loadStudentsScreen() {
@@ -1424,12 +1580,15 @@ async function loadStudentsScreen() {
 
   const { data: students, error } = await supabaseClient
     .from('students')
-    .select('id, admission_number, full_name, gender, parent_id');
+    .select('id, admission_number, full_name, gender, date_of_birth, passport_url, parent_id');
   if (error) { showToast(error.message, 'error'); return; }
 
-  const { data: parents } = await supabaseClient.from('parents').select('id, users(full_name)');
+  const { data: parents } = await supabaseClient.from('parents').select('id, users(full_name, email)');
   const parentNameById = {};
-  (parents || []).forEach(p => { if (p.users) parentNameById[p.id] = p.users.full_name; });
+  const parentEmailById = {};
+  (parents || []).forEach(p => {
+    if (p.users) { parentNameById[p.id] = p.users.full_name; parentEmailById[p.id] = p.users.email; }
+  });
 
   let enrollmentsQuery = supabaseClient
     .from('enrollments')
@@ -1444,14 +1603,20 @@ async function loadStudentsScreen() {
     admission_number: s.admission_number,
     full_name: s.full_name,
     gender: s.gender,
+    date_of_birth: s.date_of_birth,
+    passport_url: s.passport_url,
+    parent_id: s.parent_id,
+    parent_email: s.parent_id ? (parentEmailById[s.parent_id] || '') : '',
     class_arm: enrollmentByStudent[s.id]
-      ? `${enrollmentByStudent[s.id].classes?.name || '—'} ${enrollmentByStudent[s.id].class_arms?.name || ''}`
+      ? (enrollmentByStudent[s.id].classes?.name || '—')
       : 'Not enrolled this term',
     parent_name: s.parent_id ? (parentNameById[s.parent_id] || '—') : 'Unlinked',
   }));
 
   renderStudentTable(studentCache);
 }
+
+let studentEditContext = null; // student id currently being edited, or null when adding
 
 function renderStudentTable(rows) {
   const { pageRows } = paginate(rows, studentPage, 'student-pagination', (p) => { studentPage = p; renderStudentTable(rows); });
@@ -1467,23 +1632,59 @@ function renderStudentTable(rows) {
       <td>${escapeHtml(r.gender || '—')}</td>
       <td>${escapeHtml(r.class_arm)}</td>
       <td>${escapeHtml(r.parent_name)}</td>
-      <td><button type="button" class="icon-btn" data-transfer="${r.id}">Transfer</button></td>
+      <td>
+        <button type="button" class="icon-btn" data-edit-student="${r.id}">Edit</button>
+        <button type="button" class="icon-btn" data-transfer="${r.id}">Transfer</button>
+      </td>
     </tr>
   `).join('');
+
+  tbody.querySelectorAll('[data-edit-student]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const row = studentCache.find(r => r.id === btn.dataset.editStudent);
+      if (row) openStudentEditForm(row);
+    });
+  });
 
   tbody.querySelectorAll('[data-transfer]').forEach(btn => {
     btn.addEventListener('click', () => openTransferPrompt(btn.dataset.transfer));
   });
 }
 
+function openStudentEditForm(row) {
+  studentEditContext = row.id;
+  document.getElementById('student-admission-number').value = row.admission_number || '';
+  document.getElementById('student-full-name').value = row.full_name || '';
+  document.getElementById('student-gender').value = row.gender || 'Male';
+  document.getElementById('student-dob').value = row.date_of_birth || '';
+  document.getElementById('student-parent-email').value = row.parent_email || '';
+  document.getElementById('student-passport-file').value = '';
+
+  document.getElementById('student-class-group').classList.add('hidden');
+  document.getElementById('student-form-edit-note').classList.remove('hidden');
+  document.getElementById('student-form-heading').textContent = 'Edit student';
+  document.getElementById('student-form-submit').textContent = 'Save changes';
+  toggleInlineForm('student-form-card', true);
+}
+
+function resetStudentForm() {
+  studentEditContext = null;
+  document.getElementById('student-form').reset();
+  document.getElementById('student-class-group').classList.remove('hidden');
+  document.getElementById('student-form-edit-note').classList.add('hidden');
+  document.getElementById('student-form-heading').textContent = 'Add student';
+  document.getElementById('student-form-submit').textContent = 'Register student';
+}
+
 async function openTransferPrompt(studentId) {
   if (!appState.activeTermId) { showToast('No active term set.', 'error'); return; }
   await refreshClassesWithArmsCache();
-  const options = classesWithArmsCache.flatMap(c => c.arms.map(a => `${c.name} ${a.name} → id:${a.id}`)).join('\n');
-  const armId = prompt(`Transfer to which arm? Enter the arm's ID from this list:\n\n${options}`);
-  if (!armId) return;
-  const targetArm = classesWithArmsCache.flatMap(c => c.arms.map(a => ({ ...a, classId: c.id }))).find(a => a.id === armId.trim());
-  if (!targetArm) { showToast('Arm ID not recognized — copy it exactly from the list.', 'error'); return; }
+  const options = classesWithArmsCache.map(c => `${c.name} → id:${c.id}`).join('\n');
+  const classId = prompt(`Transfer to which class? Enter the class's ID from this list:\n\n${options}`);
+  if (!classId) return;
+  const targetClass = classesWithArmsCache.find(c => c.id === classId.trim());
+  if (!targetClass || !targetClass.arms[0]) { showToast('Class ID not recognized — copy it exactly from the list.', 'error'); return; }
+  const targetArm = targetClass.arms[0];
 
   showLoading();
   try {
@@ -1495,14 +1696,14 @@ async function openTransferPrompt(studentId) {
       student_id: studentId,
       from_class_id: enrollment.class_id,
       from_arm_id: enrollment.arm_id,
-      to_class_id: targetArm.classId,
+      to_class_id: targetClass.id,
       to_arm_id: targetArm.id,
       transferred_by: appState.user.id,
     });
     if (transferErr) throw transferErr;
 
     const { error: updateErr } = await supabaseClient
-      .from('enrollments').update({ class_id: targetArm.classId, arm_id: targetArm.id, status: 'transferred' }).eq('id', enrollment.id);
+      .from('enrollments').update({ class_id: targetClass.id, arm_id: targetArm.id, status: 'transferred' }).eq('id', enrollment.id);
     if (updateErr) throw updateErr;
 
     showToast('Student transferred.', 'success');
@@ -1515,9 +1716,12 @@ async function openTransferPrompt(studentId) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('student-add-btn').addEventListener('click', () => toggleInlineForm('student-form-card', true));
+  document.getElementById('student-add-btn').addEventListener('click', () => {
+    resetStudentForm();
+    toggleInlineForm('student-form-card', true);
+  });
   document.getElementById('student-form-cancel').addEventListener('click', () => {
-    document.getElementById('student-form').reset();
+    resetStudentForm();
     toggleInlineForm('student-form-card', false);
   });
   document.getElementById('student-search').addEventListener('input', (e) => {
@@ -1526,16 +1730,12 @@ document.addEventListener('DOMContentLoaded', () => {
     renderStudentTable(studentCache.filter(r =>
       r.full_name.toLowerCase().includes(q) || r.admission_number.toLowerCase().includes(q)));
   });
-  document.getElementById('student-class').addEventListener('change', (e) => {
-    populateStudentArmSelect(e.target.value);
-  });
-
   document.getElementById('student-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const errorEl = document.getElementById('student-form-error');
     errorEl.classList.add('hidden');
 
-    if (!appState.activeSessionId || !appState.activeTermId) {
+    if (!studentEditContext && (!appState.activeSessionId || !appState.activeTermId)) {
       errorEl.textContent = 'No active academic session/term is set. Complete the Setup Wizard (or set one in Settings) before enrolling students.';
       errorEl.classList.remove('hidden');
       return;
@@ -1556,34 +1756,60 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       const passportFile = document.getElementById('student-passport-file').files[0];
-      const passportUrl = await uploadSchoolAsset(passportFile, 'passports');
 
-      const { data: student, error: studentErr } = await supabaseClient
-        .from('students')
-        .insert({
+      if (studentEditContext) {
+        // Editing an existing student — class/enrollment untouched (use Transfer for that)
+        const updatePayload = {
           admission_number: document.getElementById('student-admission-number').value.trim(),
           full_name: document.getElementById('student-full-name').value.trim(),
           gender: document.getElementById('student-gender').value,
           date_of_birth: document.getElementById('student-dob').value || null,
-          passport_url: passportUrl,
           parent_id: parentId,
-        })
-        .select()
-        .single();
-      if (studentErr) throw studentErr;
+        };
+        if (passportFile) {
+          const passportUrl = await uploadSchoolAsset(passportFile, 'passports');
+          if (passportUrl) updatePayload.passport_url = passportUrl;
+        }
+        const { error: updateErr } = await supabaseClient.from('students').update(updatePayload).eq('id', studentEditContext);
+        if (updateErr) throw updateErr;
 
-      const { error: enrollErr } = await supabaseClient.from('enrollments').insert({
-        student_id: student.id,
-        session_id: appState.activeSessionId,
-        term_id: appState.activeTermId,
-        class_id: document.getElementById('student-class').value,
-        arm_id: document.getElementById('student-arm').value,
-        status: 'active',
-      });
-      if (enrollErr) throw enrollErr;
+        showToast('Student details updated.', 'success');
+      } else {
+        // Adding a new student
+        const passportUrl = await uploadSchoolAsset(passportFile, 'passports');
 
-      showToast('Student registered and enrolled.', 'success');
-      document.getElementById('student-form').reset();
+        const { data: student, error: studentErr } = await supabaseClient
+          .from('students')
+          .insert({
+            admission_number: document.getElementById('student-admission-number').value.trim(),
+            full_name: document.getElementById('student-full-name').value.trim(),
+            gender: document.getElementById('student-gender').value,
+            date_of_birth: document.getElementById('student-dob').value || null,
+            passport_url: passportUrl,
+            parent_id: parentId,
+          })
+          .select()
+          .single();
+        if (studentErr) throw studentErr;
+
+        const selectedClassId = document.getElementById('student-class').value;
+        const selectedClass = classesWithArmsCache.find(c => c.id === selectedClassId);
+        if (!selectedClass || !selectedClass.arms[0]) throw new Error('That class has no arm set up yet — contact support.');
+
+        const { error: enrollErr } = await supabaseClient.from('enrollments').insert({
+          student_id: student.id,
+          session_id: appState.activeSessionId,
+          term_id: appState.activeTermId,
+          class_id: selectedClassId,
+          arm_id: selectedClass.arms[0].id,
+          status: 'active',
+        });
+        if (enrollErr) throw enrollErr;
+
+        showToast('Student registered and enrolled.', 'success');
+      }
+
+      resetStudentForm();
       toggleInlineForm('student-form-card', false);
       loadStudentsScreen();
     } catch (err) {
@@ -1613,7 +1839,7 @@ async function loadMyClassScreen() {
 
   const arms = await getTeacherArms();
   if (arms.length === 0) {
-    container.innerHTML = `<div class="card card-notice"><p>You have not been assigned to a class arm yet. Ask your administrator to assign you under Classes &amp; Subjects.</p></div>`;
+    container.innerHTML = `<div class="card card-notice"><p>You have not been assigned to a class yet. Ask your administrator to assign you under Classes &amp; Subjects.</p></div>`;
     return;
   }
   if (!appState.activeTermId) {
@@ -1631,7 +1857,7 @@ async function loadMyClassScreen() {
 
     html += `
       <div class="card">
-        <h2 class="card-title">${escapeHtml(arm.classes.name)} ${escapeHtml(arm.name)} — ${(enrollments || []).length} student(s)</h2>
+        <h2 class="card-title">${escapeHtml(arm.classes.name)} — ${(enrollments || []).length} student(s)</h2>
         <table class="data-table">
           <thead><tr><th>Adm. No.</th><th>Name</th><th>Gender</th></tr></thead>
           <tbody>
@@ -1669,12 +1895,12 @@ async function loadResultsScreen() {
 
   const arms = await getTeacherArms();
   if (arms.length === 0) {
-    notice.innerHTML = `<div class="card card-notice"><p>You have not been assigned to a class arm yet. Ask your administrator to assign you under Classes &amp; Subjects.</p></div>`;
+    notice.innerHTML = `<div class="card card-notice"><p>You have not been assigned to a class yet. Ask your administrator to assign you under Classes &amp; Subjects.</p></div>`;
     armSelect.innerHTML = '';
     subjectSelect.innerHTML = '';
     return;
   }
-  armSelect.innerHTML = arms.map(a => `<option value="${a.id}">${escapeHtml(a.classes.name)} ${escapeHtml(a.name)}</option>`).join('');
+  armSelect.innerHTML = arms.map(a => `<option value="${a.id}">${escapeHtml(a.classes.name)}</option>`).join('');
   resultsScreenState.armId = arms[0].id;
 
   if (!appState.activeTermId) {
@@ -1731,7 +1957,7 @@ async function renderResultsEntryTable() {
     .eq('term_id', appState.activeTermId);
 
   if (!enrollments || enrollments.length === 0) {
-    notice.innerHTML = `<div class="card card-notice"><p>No students enrolled in this arm for the current term yet.</p></div>`;
+    notice.innerHTML = `<div class="card card-notice"><p>No students enrolled in this class for the current term yet.</p></div>`;
     table.style.display = 'none';
     submitRow.style.display = 'none';
     return;
@@ -1921,7 +2147,7 @@ async function loadApprovalsScreen() {
 
   const allArms = classesWithArmsCache.flatMap(c => c.arms.map(a => ({ ...a, className: c.name })));
   if (allArms.length === 0) {
-    container.innerHTML = `<div class="card card-notice"><p>No classes/arms exist yet. Add them under Classes &amp; Subjects first.</p></div>`;
+    container.innerHTML = `<div class="card card-notice"><p>No classes exist yet. Add them under Classes &amp; Subjects first.</p></div>`;
     return;
   }
   if (!appState.activeTermId) {
@@ -1935,9 +2161,9 @@ async function loadApprovalsScreen() {
     <div class="card">
       <div class="form-grid">
         <div>
-          <label class="field-label">Class arm</label>
+          <label class="field-label">Class</label>
           <select class="field-input" id="approvals-arm-select">
-            ${allArms.map(a => `<option value="${a.id}" ${a.id === approvalsState.armId ? 'selected' : ''}>${escapeHtml(a.className)} ${escapeHtml(a.name)}</option>`).join('')}
+            ${allArms.map(a => `<option value="${a.id}" ${a.id === approvalsState.armId ? 'selected' : ''}>${escapeHtml(a.className)}</option>`).join('')}
           </select>
         </div>
         <div>
@@ -1998,7 +2224,7 @@ async function renderApprovalsTable() {
   (enrollments || []).forEach(e => { nameByEnrollment[e.id] = e.students.full_name; });
 
   if (submitted.length === 0) {
-    wrap.innerHTML = `<div class="card card-notice"><p>No results awaiting approval for this arm/subject right now.</p></div>`;
+    wrap.innerHTML = `<div class="card card-notice"><p>No results awaiting approval for this class/subject right now.</p></div>`;
     return;
   }
 
@@ -2109,7 +2335,7 @@ async function renderAdminReportCardsScreen(container) {
   await refreshClassesWithArmsCache();
   const allArms = classesWithArmsCache.flatMap(c => c.arms.map(a => ({ ...a, className: c.name })));
   if (allArms.length === 0) {
-    container.innerHTML = `<div class="card card-notice"><p>No classes/arms exist yet.</p></div>`;
+    container.innerHTML = `<div class="card card-notice"><p>No classes exist yet.</p></div>`;
     return;
   }
   if (!appState.activeTermId) {
@@ -2122,14 +2348,14 @@ async function renderAdminReportCardsScreen(container) {
     <div class="card">
       <div class="form-grid">
         <div>
-          <label class="field-label">Class arm</label>
+          <label class="field-label">Class</label>
           <select class="field-input" id="reportcards-arm-select">
-            ${allArms.map(a => `<option value="${a.id}" ${a.id === reportCardsArmId ? 'selected' : ''}>${escapeHtml(a.className)} ${escapeHtml(a.name)}</option>`).join('')}
+            ${allArms.map(a => `<option value="${a.id}" ${a.id === reportCardsArmId ? 'selected' : ''}>${escapeHtml(a.className)}</option>`).join('')}
           </select>
         </div>
       </div>
       <div class="form-actions">
-        <button type="button" class="btn btn-primary" id="generate-reportcards-btn">Generate / refresh report cards for this arm</button>
+        <button type="button" class="btn btn-primary" id="generate-reportcards-btn">Generate / refresh report cards for this class</button>
       </div>
     </div>
     <div id="reportcards-table-wrap"></div>
@@ -2259,6 +2485,7 @@ async function renderReportCardsTable(rows) {
         showToast('Published.', 'success');
         notifyParentReportCardPublished(btn.dataset.publish);
         renderReportCardsTable(rows);
+        checkSessionRolloverPrompt();
       } catch (err) {
         showToast(err.message || 'Could not publish.', 'error');
       } finally {
@@ -2290,7 +2517,7 @@ async function notifyParentReportCardPublished(reportCardId) {
 async function renderTeacherReportCardsScreen(container) {
   const arms = await getTeacherArms();
   if (arms.length === 0 || !appState.activeTermId) {
-    container.innerHTML = `<div class="card card-notice"><p>No class arm or active term yet.</p></div>`;
+    container.innerHTML = `<div class="card card-notice"><p>No assigned class or active term yet.</p></div>`;
     return;
   }
   const { data: enrollments } = await supabaseClient
@@ -2482,7 +2709,7 @@ async function fetchFullReportCardData(reportCardId) {
 
   const { data: enrollment } = await supabaseClient
     .from('enrollments')
-    .select('id, class_id, session_id, classes(name), class_arms(name, class_teacher_id), sessions(name), terms(name)')
+    .select('id, class_id, arm_id, term_id, session_id, classes(name), class_arms(name, class_teacher_id), sessions(name), terms(name)')
     .eq('id', card.enrollment_id).single();
 
   const { data: student } = await supabaseClient
@@ -2503,9 +2730,11 @@ async function fetchFullReportCardData(reportCardId) {
   const allSubjects = (classSubjectLinks || []).map(l => l.subjects).filter(Boolean)
     .sort((a, b) => a.name.localeCompare(b.name));
 
-  // All terms in this session at or before the current card's own term.
-  const currentTermIndex = TERM_ORDER.indexOf(enrollment.terms.name);
-  const includedTermNames = TERM_ORDER.slice(0, currentTermIndex + 1);
+  // First Term and Second Term cards show only their own term's results.
+  // The Third Term card is the session's final/annual ledger, so it shows
+  // all three terms side by side per subject, standard Nigerian report-card
+  // style — with an annual (First+Second+Third)/3 average per subject too.
+  const includedTermNames = enrollment.terms.name === 'Third Term' ? TERM_ORDER : [enrollment.terms.name];
   const { data: sessionTerms } = await supabaseClient
     .from('terms').select('id, name').eq('session_id', enrollment.session_id).in('name', includedTermNames);
 
@@ -2528,27 +2757,64 @@ async function fetchFullReportCardData(reportCardId) {
 
   // Build one row per subject with each included term's CA/Exam/Total, plus
   // a single Grade/Remark reflecting the most recently completed term that
-  // has data for that subject (per the school's own template design).
+  // has data for that subject (per the school's own template design). On
+  // the Third Term card, also add this subject's annual total/average —
+  // First + Second + Third Term totals, divided by 3 — but only once all
+  // three terms actually have an approved result for that subject.
+  // Fetch the current grading bands so the Annual Average gets its OWN grade —
+  // previously this column just carried over whichever single term's grade was
+  // most recent, which looks wrong sitting next to a different Annual Average
+  // number (e.g. Annual Avg 65.3% showing the Third Term's own "A" instead of
+  // the "B" that 65.3% itself falls into).
+  const { data: gradingBands } = await supabaseClient
+    .from('grading_rules').select('min_score, max_score, grade, remark').is('session_id', null);
+  const findGradeBand = (score) => (gradingBands || []).find(b => score >= b.min_score && score <= b.max_score) || null;
+
+  const isThirdTermCard = includedTermNames.length === 3;
   const subjectRows = allSubjects.map(subj => {
     const terms = includedTermNames.map(termName => resultsByTermAndSubject[termName][subj.id] || null);
     const latest = [...terms].reverse().find(t => t) || null;
+    const allThreeTermsPresent = isThirdTermCard && terms.every(t => t);
+    const annualTotal = allThreeTermsPresent ? terms.reduce((s, t) => s + Number(t.total_score), 0) : null;
+    const annualAverage = allThreeTermsPresent ? annualTotal / 3 : null;
+    const annualBand = annualAverage != null ? findGradeBand(annualAverage) : null;
     return {
       subjectName: subj.name,
       terms, // aligned with includedTermNames
-      grade: latest ? latest.grade : null,
-      remark: latest ? latest.remark : null,
+      grade: annualBand ? annualBand.grade : (latest ? latest.grade : null),
+      remark: annualBand ? annualBand.remark : (latest ? latest.remark : null),
+      annualAverage,
     };
   });
+
+  // Annual class position: rank this student against arm-mates' annual_average
+  // (already computed by "Calculate annual averages" in Promotions, which
+  // itself averages each student's First/Second/Third Term overall
+  // percentage) — not by the Third Term's own percentage/position alone.
+  let annualPosition = null, annualClassSize = null;
+  if (isThirdTermCard && card.annual_average != null) {
+    const { data: armEnrollments } = await supabaseClient
+      .from('enrollments').select('id').eq('arm_id', enrollment.arm_id).eq('term_id', enrollment.term_id);
+    const { data: siblingCards } = await supabaseClient
+      .from('report_cards').select('id, annual_average').eq('is_annual', false)
+      .not('annual_average', 'is', null)
+      .in('enrollment_id', (armEnrollments || []).map(e => e.id));
+    const ranked = (siblingCards || []).slice().sort((a, b) => Number(b.annual_average) - Number(a.annual_average));
+    const idx = ranked.findIndex(c => c.id === card.id);
+    if (idx !== -1) { annualPosition = idx + 1; annualClassSize = ranked.length; }
+  }
 
   return {
     card, student, enrollment, teacherName,
     includedTermNames, subjectRows,
+    annualPosition, annualClassSize,
     school: appState.schoolSettings,
   };
 }
 
 function renderReportCardHTML(data) {
-  const { card, student, enrollment, teacherName, includedTermNames, subjectRows, school } = data;
+  const { card, student, enrollment, teacherName, includedTermNames, subjectRows, annualPosition, annualClassSize, school } = data;
+  const showAnnualColumn = includedTermNames.length === 3;
   const watermark = school?.report_watermark_url
     ? `<div class="rc-watermark"><img src="${school.report_watermark_url}" alt=""></div>` : '';
   const logo = school?.logo_url ? `<img class="rc-logo" src="${school.logo_url}" alt="School logo">` : '';
@@ -2570,10 +2836,12 @@ function renderReportCardHTML(data) {
       <td class="num">${t ? t.exam_score : ''}</td>
       <td class="num">${t ? t.total_score : ''}</td>
     `).join('');
+    const annualCell = showAnnualColumn ? `<td class="num">${row.annualAverage != null ? row.annualAverage.toFixed(1) : ''}</td>` : '';
     return `
       <tr>
         <td>${escapeHtml(row.subjectName)}</td>
         ${termCells}
+        ${annualCell}
         <td class="num">${escapeHtml(row.grade || '')}</td>
         <td>${escapeHtml(row.remark || '')}</td>
       </tr>`;
@@ -2600,7 +2868,7 @@ function renderReportCardHTML(data) {
       <div class="rc-student-grid">
         <div><span>Name</span><span>${escapeHtml(student.full_name)}</span></div>
         <div><span>Sex</span><span>${escapeHtml(student.gender || '—')}</span></div>
-        <div><span>Class</span><span>${escapeHtml(enrollment.classes.name)} ${escapeHtml(enrollment.class_arms.name)}</span></div>
+        <div><span>Class</span><span>${escapeHtml(enrollment.classes.name)}</span></div>
         <div><span>No. in Class</span><span>${card.class_size ?? '—'}</span></div>
         <div><span>Total Score</span><span>${card.total_score != null ? card.total_score : '—'}</span></div>
         <div><span>Percentage</span><span>${card.percentage != null ? Number(card.percentage).toFixed(1) + '%' : '—'}</span></div>
@@ -2612,19 +2880,20 @@ function renderReportCardHTML(data) {
     <div class="rc-table-scroll">
       <table class="rc-subjects-table rc-ledger-table">
         <thead>
-          <tr><th rowspan="2">Subject</th>${groupHeaderCells}<th rowspan="2">Grade</th><th rowspan="2">Teacher's Remark</th></tr>
+          <tr><th rowspan="2">Subject</th>${groupHeaderCells}${showAnnualColumn ? '<th rowspan="2">Annual<br>Avg</th>' : ''}<th rowspan="2">Grade</th><th rowspan="2">Teacher's Remark</th></tr>
           <tr>${subHeaderCells}</tr>
         </thead>
         <tbody>
-          <tr class="rc-mark-obtainable"><td>Mark Obtainable</td>${markObtainableCells}<td></td><td></td></tr>
-          ${subjectBodyRows || `<tr><td colspan="${2 + includedTermNames.length * 3}" style="text-align:center;color:var(--color-slate);">No approved subject results yet.</td></tr>`}
+          <tr class="rc-mark-obtainable"><td>Mark Obtainable</td>${markObtainableCells}${showAnnualColumn ? '<td></td>' : ''}<td></td><td></td></tr>
+          ${subjectBodyRows || `<tr><td colspan="${2 + includedTermNames.length * 3 + (showAnnualColumn ? 1 : 0)}" style="text-align:center;color:var(--color-slate);">No approved subject results yet.</td></tr>`}
         </tbody>
       </table>
     </div>
 
     ${enrollment.terms.name === 'Third Term' && card.annual_average != null ? `
-      <div class="rc-summary" style="grid-template-columns: repeat(2, 1fr);">
+      <div class="rc-summary" style="grid-template-columns: repeat(3, 1fr);">
         <div class="rc-summary-box"><div class="label">Annual Average</div><div class="value">${Number(card.annual_average).toFixed(1)}%</div></div>
+        <div class="rc-summary-box"><div class="label">Annual Position</div><div class="value" style="font-size:14px;">${annualPosition != null ? `${annualPosition} of ${annualClassSize}` : '—'}</div></div>
         <div class="rc-summary-box"><div class="label">Promotion Status</div><div class="value" style="font-size:14px;">${escapeHtml(card.promotion_status || 'Pending')}</div></div>
       </div>` : ''}
 
@@ -2688,6 +2957,7 @@ document.addEventListener('DOMContentLoaded', () => {
       notifyParentReportCardPublished(currentPreviewCardId);
       closeReportCardPreview();
       loadReportCardsScreen();
+      checkSessionRolloverPrompt();
     } catch (err) {
       showToast(err.message || 'Could not publish.', 'error');
     } finally {
@@ -2715,7 +2985,7 @@ async function loadPromotionsScreen() {
   const allArms = classesWithArmsCache.flatMap(c => c.arms.map(a => ({ ...a, className: c.name, classId: c.id })));
 
   if (allArms.length === 0) {
-    container.innerHTML = `<div class="card card-notice"><p>No classes/arms exist yet.</p></div>`;
+    container.innerHTML = `<div class="card card-notice"><p>No classes exist yet.</p></div>`;
     return;
   }
   if (!appState.activeSessionId) {
@@ -2736,9 +3006,9 @@ async function loadPromotionsScreen() {
     <div class="card">
       <div class="form-grid">
         <div>
-          <label class="field-label">Class arm</label>
+          <label class="field-label">Class</label>
           <select class="field-input" id="promotions-arm-select">
-            ${allArms.map(a => `<option value="${a.id}" ${a.id === promotionsArmId ? 'selected' : ''}>${escapeHtml(a.className)} ${escapeHtml(a.name)}</option>`).join('')}
+            ${allArms.map(a => `<option value="${a.id}" ${a.id === promotionsArmId ? 'selected' : ''}>${escapeHtml(a.className)}</option>`).join('')}
           </select>
         </div>
         <div>
@@ -2748,8 +3018,9 @@ async function loadPromotionsScreen() {
       </div>
       <div class="form-actions">
         <button type="button" class="btn btn-ghost-dark" id="save-threshold-btn">Save threshold</button>
-        <button type="button" class="btn btn-primary" id="generate-annual-btn">Calculate annual averages for this arm</button>
+        <button type="button" class="btn btn-primary" id="generate-annual-btn">Calculate annual averages for this class</button>
       </div>
+      <p class="view-subheading" style="margin-top:10px;">Once averages are calculated below, use "Promote all" to apply the threshold automatically — students at or above it are promoted to the next class, everyone else repeats (resits) their current class. No need to decide student-by-student.</p>
     </div>
     <div id="promotions-table-wrap"></div>
   `;
@@ -2855,26 +3126,32 @@ async function renderPromotionsTable(rows, arm, allArms) {
     .from('promotions').select('*').eq('session_id', appState.activeSessionId)
     .in('student_id', rows.map(r => r.studentId));
 
+  const pendingCount = (promos || []).filter(p => p.final_status === 'pending').length;
+
   wrap.innerHTML = `
+    <div class="table-toolbar">
+      <span class="view-subheading">${pendingCount > 0 ? `${pendingCount} student(s) awaiting a decision.` : 'All calculated students already have a decision.'}</span>
+      <button type="button" class="btn btn-primary" id="promote-all-btn" ${pendingCount === 0 ? 'disabled' : ''}>Promote all (apply threshold automatically)</button>
+    </div>
     <table class="data-table">
-      <thead><tr><th>Student</th><th>Annual Avg</th><th>Recommended</th><th>Decision</th><th></th></tr></thead>
+      <thead><tr><th>Student</th><th>Annual Avg</th><th>Decision</th><th></th></tr></thead>
       <tbody>
         ${rows.map(r => {
           const card = (cards || []).find(c => c.id === r.thirdTermCardId);
           const promo = (promos || []).find(p => p.student_id === r.studentId);
           const decided = promo && promo.final_status !== 'pending';
+          let decisionCell = '—';
+          if (decided) {
+            decisionCell = `<span class="badge ${promo.final_status === 'promoted' ? 'badge-success' : 'badge-gold'}">${promo.final_status === 'promoted' ? 'Promoted' : 'Repeating'}</span>`;
+          } else if (promo) {
+            decisionCell = `<span class="badge ${promo.recommended_status === 'promote' ? 'badge-success' : 'badge-gold'}">Will ${promo.recommended_status === 'promote' ? 'promote' : 'repeat'}</span>`;
+          }
           return `
             <tr>
               <td>${escapeHtml(r.studentName)}${!r.complete ? ' <span class="badge badge-error">Incomplete</span>' : ''}</td>
               <td>${card && card.annual_average != null ? Number(card.annual_average).toFixed(1) : '—'}</td>
-              <td>${promo ? `<span class="badge ${promo.recommended_status === 'promote' ? 'badge-success' : 'badge-gold'}">${promo.recommended_status === 'promote' ? 'Promote' : 'Repeat'}</span>` : '—'}</td>
-              <td>${decided ? `<span class="badge ${promo.final_status === 'promoted' ? 'badge-success' : 'badge-gold'}">${promo.final_status === 'promoted' ? 'Promoted' : 'Repeating'}</span>` : (promo ? '<span class="badge badge-navy">Pending decision</span>' : '—')}</td>
-              <td class="row-actions">
-                ${card ? `<button type="button" class="icon-btn" data-preview="${card.id}">Preview</button>` : ''}
-                ${promo && !decided ? `
-                  <button type="button" class="icon-btn" data-approve-promo="${promo.id}" data-card="${card ? card.id : ''}" data-class="${arm.classId}">Approve promotion</button>
-                  <button type="button" class="icon-btn icon-btn-danger" data-repeat-promo="${promo.id}" data-card="${card ? card.id : ''}" data-class="${arm.classId}">Mark repeat</button>` : ''}
-              </td>
+              <td>${decisionCell}</td>
+              <td class="row-actions">${card ? `<button type="button" class="icon-btn" data-preview="${card.id}">Preview</button>` : ''}</td>
             </tr>`;
         }).join('')}
       </tbody>
@@ -2884,63 +3161,269 @@ async function renderPromotionsTable(rows, arm, allArms) {
   wrap.querySelectorAll('[data-preview]').forEach(btn => {
     btn.addEventListener('click', () => openReportCardPreview(btn.dataset.preview));
   });
-  wrap.querySelectorAll('[data-approve-promo]').forEach(btn => {
-    btn.addEventListener('click', () => decidePromotion(btn.dataset.approvePromo, btn.dataset.card, btn.dataset.class, 'promoted', allArms));
-  });
-  wrap.querySelectorAll('[data-repeat-promo]').forEach(btn => {
-    btn.addEventListener('click', () => decidePromotion(btn.dataset.repeatPromo, btn.dataset.card, btn.dataset.class, 'repeated', allArms));
-  });
+
+  const promoteAllBtn = document.getElementById('promote-all-btn');
+  if (promoteAllBtn) {
+    promoteAllBtn.addEventListener('click', () => promoteAllPending(rows, cards, promos, arm, allArms));
+  }
 }
 
-async function decidePromotion(promotionId, cardId, currentClassId, decision, allArms) {
-  if (!confirm(`Confirm: mark this student as "${decision}"?`)) return;
+// Applies a single promotion's decision: writes the final status, works out
+// the destination class (next class in sort order, or "graduated" if this is
+// the last class), and mirrors the decision onto the report card.
+async function applyPromotionDecision(promo, cardId, currentClassId, decision) {
+  let toClassId = currentClassId;
+  let newEnrollmentStatus = null;
+
+  if (decision === 'promoted') {
+    const currentClass = classesWithArmsCache.find(c => c.id === currentClassId);
+    const nextClass = classesWithArmsCache
+      .filter(c => c.sort_order > (currentClass ? currentClass.sort_order : -1))
+      .sort((a, b) => a.sort_order - b.sort_order)[0];
+    if (nextClass) {
+      toClassId = nextClass.id;
+    } else {
+      toClassId = currentClassId;
+      newEnrollmentStatus = 'graduated';
+    }
+  }
+
+  const { error: promoErr } = await supabaseClient.from('promotions').update({
+    final_status: decision,
+    to_class_id: toClassId,
+    decided_by: appState.user.id,
+    decided_at: new Date().toISOString(),
+  }).eq('id', promo.id);
+  if (promoErr) throw promoErr;
+
+  if (cardId) {
+    const { error: cardErr } = await supabaseClient.from('report_cards')
+      .update({ promotion_status: decision }).eq('id', cardId);
+    if (cardErr) throw cardErr;
+  }
+
+  if (newEnrollmentStatus) {
+    await supabaseClient.from('students').update({ enrollment_status: newEnrollmentStatus }).eq('id', promo.student_id);
+  }
+}
+
+// Replaces the old per-student "Approve promotion" / "Mark repeat" buttons
+// with one automatic pass: every pending student's own recommended_status
+// (already computed from their annual average vs. the saved threshold) is
+// applied as-is — at/above threshold promotes to the next class, everyone
+// else repeats (resits) their current class. No student-by-student review.
+async function promoteAllPending(rows, cards, promos, arm, allArms) {
+  const pending = (promos || []).filter(p => p.final_status === 'pending');
+  if (pending.length === 0) return;
+
+  const willPromote = pending.filter(p => p.recommended_status === 'promote').length;
+  const willRepeat = pending.length - willPromote;
+  if (!confirm(`Apply the threshold automatically to ${pending.length} student(s)? ${willPromote} will be promoted to the next class, ${willRepeat} will repeat (resit) this class.`)) return;
+
   showLoading();
   try {
-    let toClassId = currentClassId;
-    let newEnrollmentStatus = null;
-
-    if (decision === 'promoted') {
-      const currentClass = classesWithArmsCache.find(c => c.id === currentClassId);
-      const nextClass = classesWithArmsCache
-        .filter(c => c.sort_order > (currentClass ? currentClass.sort_order : -1))
-        .sort((a, b) => a.sort_order - b.sort_order)[0];
-      if (nextClass) {
-        toClassId = nextClass.id;
-      } else {
-        toClassId = currentClassId;
-        newEnrollmentStatus = 'graduated';
-      }
+    for (const promo of pending) {
+      const row = rows.find(r => r.studentId === promo.student_id);
+      const card = row ? (cards || []).find(c => c.id === row.thirdTermCardId) : null;
+      const decision = promo.recommended_status === 'promote' ? 'promoted' : 'repeated';
+      await applyPromotionDecision(promo, card ? card.id : null, arm.classId, decision);
     }
-
-    const { error: promoErr } = await supabaseClient.from('promotions').update({
-      final_status: decision,
-      to_class_id: toClassId,
-      decided_by: appState.user.id,
-      decided_at: new Date().toISOString(),
-    }).eq('id', promotionId);
-    if (promoErr) throw promoErr;
-
-    if (cardId) {
-      const { error: cardErr } = await supabaseClient.from('report_cards')
-        .update({ promotion_status: decision }).eq('id', cardId);
-      if (cardErr) throw cardErr;
-    }
-
-    if (newEnrollmentStatus) {
-      const { data: promoRow } = await supabaseClient.from('promotions').select('student_id').eq('id', promotionId).single();
-      if (promoRow) {
-        await supabaseClient.from('students').update({ enrollment_status: newEnrollmentStatus }).eq('id', promoRow.student_id);
-      }
-    }
-
-    showToast(`Marked ${decision}.`, 'success');
+    showToast(`Done — ${willPromote} promoted, ${willRepeat} repeating.`, 'success');
     loadPromotionsScreen();
   } catch (err) {
-    showToast(err.message || 'Could not save decision.', 'error');
+    showToast(err.message || 'Could not apply promotions.', 'error');
   } finally {
     hideLoading();
   }
 }
+
+/* ----------------------------------------------------------------------------
+   21b. SESSION ROLLOVER — "move to a new academic session"
+   Trigger points: right after any Third Term report card is published, and
+   once on every admin login. Both call checkSessionRolloverPrompt(), which
+   only actually shows the modal if (a) at least one Third Term report card
+   in the current session has been published, and (b) no successor session
+   exists yet (sessions.previous_session_id pointing back to this one) — so
+   saying "Not yet" is free: nothing is written, and the same check just
+   fires again next time.
+   ---------------------------------------------------------------------------- */
+async function checkSessionRolloverPrompt() {
+  if (!appState.user || appState.user.role !== 'admin' || !appState.activeSessionId) return;
+
+  const { data: thirdTerm } = await supabaseClient
+    .from('terms').select('id').eq('session_id', appState.activeSessionId).eq('name', 'Third Term').maybeSingle();
+  if (!thirdTerm) return;
+
+  const { data: thirdTermEnrollments } = await supabaseClient
+    .from('enrollments').select('id').eq('term_id', thirdTerm.id);
+  if (!thirdTermEnrollments || thirdTermEnrollments.length === 0) return;
+
+  const { data: publishedCards } = await supabaseClient
+    .from('report_cards').select('id').eq('is_annual', false).not('published_at', 'is', null)
+    .in('enrollment_id', thirdTermEnrollments.map(e => e.id)).limit(1);
+  if (!publishedCards || publishedCards.length === 0) return;
+
+  const { data: successor } = await supabaseClient
+    .from('sessions').select('id').eq('previous_session_id', appState.activeSessionId).maybeSingle();
+  if (successor) return;
+
+  const { data: session } = await supabaseClient.from('sessions').select('name').eq('id', appState.activeSessionId).single();
+  document.getElementById('session-rollover-current-name').textContent = session ? session.name : 'this session';
+  document.getElementById('session-rollover-prompt').classList.remove('hidden');
+}
+
+function closeSessionWizardModal() {
+  document.getElementById('session-wizard-modal').classList.add('hidden');
+  document.getElementById('session-wizard-form').reset();
+  document.getElementById('session-wizard-error').classList.add('hidden');
+}
+
+// Creates the new session + its 3 terms, carries every student from the
+// current session's Third Term into the new First Term (using their
+// Promotions decision where one exists), then makes the new session/term
+// active app-wide.
+async function createNextSessionAndRollover({ sessionName, termDates }) {
+  const { data: newSession, error: sessionErr } = await supabaseClient
+    .from('sessions')
+    .insert({ name: sessionName, is_active: false, previous_session_id: appState.activeSessionId })
+    .select().single();
+  if (sessionErr) throw sessionErr;
+
+  const termRows = TERM_ORDER.map(name => ({
+    session_id: newSession.id,
+    name,
+    start_date: termDates[name].start,
+    end_date: termDates[name].end,
+    is_current: false,
+    is_result_entry_open: false,
+  }));
+  const { data: newTerms, error: termsErr } = await supabaseClient.from('terms').insert(termRows).select();
+  if (termsErr) throw termsErr;
+  const newFirstTerm = newTerms.find(t => t.name === 'First Term');
+
+  // Every student enrolled in the outgoing Third Term, so no one gets
+  // silently dropped even if Promotions was never touched for them.
+  const { data: oldThirdTerm } = await supabaseClient
+    .from('terms').select('id').eq('session_id', appState.activeSessionId).eq('name', 'Third Term').single();
+  const { data: thirdTermEnrollments } = await supabaseClient
+    .from('enrollments').select('id, student_id, class_id, arm_id').eq('term_id', oldThirdTerm.id);
+
+  const { data: promotions } = await supabaseClient
+    .from('promotions').select('student_id, final_status, to_class_id, from_class_id').eq('session_id', appState.activeSessionId);
+  const promoByStudent = {};
+  (promotions || []).forEach(p => { promoByStudent[p.student_id] = p; });
+
+  const { data: studentsRows } = await supabaseClient
+    .from('students').select('id, enrollment_status').in('id', (thirdTermEnrollments || []).map(e => e.student_id));
+  const enrollmentStatusByStudent = {};
+  (studentsRows || []).forEach(s => { enrollmentStatusByStudent[s.id] = s.enrollment_status; });
+
+  await refreshClassesWithArmsCache();
+
+  let carried = 0, undecided = 0, skippedGraduated = 0, skippedNoArm = 0;
+  const newEnrollmentRows = [];
+
+  for (const e of (thirdTermEnrollments || [])) {
+    if (enrollmentStatusByStudent[e.student_id] === 'graduated') { skippedGraduated++; continue; }
+
+    const promo = promoByStudent[e.student_id];
+    let targetClassId = e.class_id;
+    if (promo) {
+      targetClassId = promo.to_class_id || promo.from_class_id || e.class_id;
+    } else {
+      undecided++;
+    }
+
+    const targetClass = classesWithArmsCache.find(c => c.id === targetClassId);
+    if (!targetClass || targetClass.arms.length === 0) { skippedNoArm++; continue; }
+
+    // Every class has exactly one hidden arm behind the scenes, so there's
+    // nothing to match — just use it.
+    const chosenArm = targetClass.arms[0];
+
+    newEnrollmentRows.push({
+      student_id: e.student_id,
+      session_id: newSession.id,
+      term_id: newFirstTerm.id,
+      class_id: targetClassId,
+      arm_id: chosenArm.id,
+      status: 'active',
+    });
+    carried++;
+  }
+
+  if (newEnrollmentRows.length > 0) {
+    const { error: enrollErr } = await supabaseClient.from('enrollments').insert(newEnrollmentRows);
+    if (enrollErr) throw enrollErr;
+  }
+
+  // Flip the whole app over to the new session/term. Cleared globally (not
+  // just within the old session) so there's never more than one is_active
+  // session or is_current term at once, matching how loadActiveSessionAndTerm()
+  // reads them (no session filter).
+  await supabaseClient.from('sessions').update({ is_active: false }).eq('is_active', true);
+  await supabaseClient.from('sessions').update({ is_active: true }).eq('id', newSession.id);
+  await supabaseClient.from('terms').update({ is_current: false }).eq('is_current', true);
+  await supabaseClient.from('terms').update({ is_current: true }).eq('id', newFirstTerm.id);
+
+  setState({ activeSessionId: newSession.id, activeTermId: newFirstTerm.id });
+
+  return { carried, undecided, skippedGraduated, skippedNoArm };
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('session-rollover-not-yet-btn').addEventListener('click', () => {
+    document.getElementById('session-rollover-prompt').classList.add('hidden');
+  });
+
+  document.getElementById('session-rollover-yes-btn').addEventListener('click', () => {
+    document.getElementById('session-rollover-prompt').classList.add('hidden');
+    document.getElementById('session-wizard-modal').classList.remove('hidden');
+  });
+
+  document.getElementById('session-wizard-cancel-btn').addEventListener('click', closeSessionWizardModal);
+
+  document.getElementById('session-wizard-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const errorEl = document.getElementById('session-wizard-error');
+    errorEl.classList.add('hidden');
+
+    const sessionName = document.getElementById('sw-session-name').value.trim();
+    const termDates = {};
+    let datesValid = true;
+    document.querySelectorAll('#session-wizard-form .wizard-term-row').forEach(row => {
+      const start = row.querySelector('[data-field="start"]').value;
+      const end = row.querySelector('[data-field="end"]').value;
+      if (!start || !end || end < start) datesValid = false;
+      termDates[row.dataset.term] = { start, end };
+    });
+    if (!sessionName || !datesValid) {
+      errorEl.textContent = 'Enter a session name and make sure every term has a start date on or before its end date.';
+      errorEl.classList.remove('hidden');
+      return;
+    }
+
+    showLoading();
+    try {
+      const result = await createNextSessionAndRollover({ sessionName, termDates });
+      closeSessionWizardModal();
+      showToast(
+        `"${sessionName}" is now the active session. ${result.carried} student(s) carried into First Term` +
+        (result.undecided > 0 ? ` (${result.undecided} without a promotion decision — carried at their current class)` : '') +
+        (result.skippedGraduated > 0 ? `. ${result.skippedGraduated} graduated student(s) skipped` : '') +
+        (result.skippedNoArm > 0 ? `. ${result.skippedNoArm} skipped — target class isn't set up yet` : '') + '.',
+        'success'
+      );
+      renderTopbarContext();
+      navigateTo(appState.currentView);
+    } catch (err) {
+      errorEl.textContent = err.message || 'Could not create the new session.';
+      errorEl.classList.remove('hidden');
+    } finally {
+      hideLoading();
+    }
+  });
+});
 
 /* ----------------------------------------------------------------------------
    22. DASHBOARD ANALYTICS (Admin) — Phase 8
@@ -3021,10 +3504,6 @@ async function loadDashboardAnalytics() {
     gradeChart = renderBarChartSVG(chartData, { color: 'var(--color-gold)' });
   }
 
-  // Recent activity from audit_log
-  const { data: recent } = await supabaseClient
-    .from('audit_log').select('*, users(full_name)').order('created_at', { ascending: false }).limit(8);
-
   container.innerHTML = `
     <div class="dashboard-stat-grid">
       ${[
@@ -3046,195 +3525,7 @@ async function loadDashboardAnalytics() {
       <div class="card"><h2 class="card-title">Enrollment by class</h2>${enrollmentChart}</div>
       <div class="card"><h2 class="card-title">Grade distribution (approved results)</h2>${gradeChart}</div>
     </div>
-
-    <div class="card">
-      <h2 class="card-title">Recent activity</h2>
-      ${(recent || []).length === 0 ? '<p class="view-subheading">Nothing recorded yet.</p>' : `
-        <table class="data-table">
-          <thead><tr><th>When</th><th>User</th><th>Action</th><th>Table</th></tr></thead>
-          <tbody>
-            ${recent.map(r => `
-              <tr>
-                <td>${new Date(r.created_at).toLocaleString()}</td>
-                <td>${escapeHtml(r.users?.full_name || 'System')}</td>
-                <td>${escapeHtml(r.action_type)}</td>
-                <td>${escapeHtml(r.table_name)}</td>
-              </tr>`).join('')}
-          </tbody>
-        </table>`}
-    </div>
   `;
-}
-
-/* ----------------------------------------------------------------------------
-   23. ATTENDANCE (Phase 8)
-   Teacher: daily entry for their arm, with auto-computed term totals.
-   Admin: pick any arm, view the same totals (read-only).
-   Parent: their child's own totals for the active term.
-   ---------------------------------------------------------------------------- */
-let attendanceArmId = null;
-
-async function loadAttendanceScreen() {
-  const container = document.getElementById('attendance-content');
-  const sub = document.getElementById('attendance-subheading');
-
-  if (appState.user.role === 'teacher') {
-    sub.textContent = 'Mark today\'s attendance for your class. Totals update automatically.';
-    await renderTeacherAttendanceScreen(container);
-  } else if (appState.user.role === 'admin') {
-    sub.textContent = 'Read-only view of attendance totals per class arm.';
-    await renderAdminAttendanceScreen(container);
-  } else {
-    sub.textContent = 'Your child\'s attendance for the active term.';
-    await renderParentAttendanceScreen(container);
-  }
-}
-
-async function renderTeacherAttendanceScreen(container) {
-  const arms = await getTeacherArms();
-  if (arms.length === 0 || !appState.activeTermId) {
-    container.innerHTML = `<div class="card card-notice"><p>No class arm or active term yet.</p></div>`;
-    return;
-  }
-  const arm = arms[0];
-  const today = new Date().toISOString().slice(0, 10);
-
-  const { data: enrollments } = await supabaseClient
-    .from('enrollments').select('id, student_id, students(full_name)').eq('arm_id', arm.id).eq('term_id', appState.activeTermId);
-
-  const { data: todayRecords } = await supabaseClient
-    .from('attendance').select('*').eq('date', today).in('enrollment_id', (enrollments || []).map(e => e.id));
-  const byEnrollment = {};
-  (todayRecords || []).forEach(r => { byEnrollment[r.enrollment_id] = r.status; });
-
-  container.innerHTML = `
-    <div class="card">
-      <h2 class="card-title">${escapeHtml(arm.classes.name)} ${escapeHtml(arm.name)} — ${today}</h2>
-      <table class="data-table">
-        <thead><tr><th>Student</th><th>Present</th><th>Absent</th></tr></thead>
-        <tbody>
-          ${(enrollments || []).map(e => `
-            <tr data-enrollment-id="${e.id}" data-student-id="${e.student_id}">
-              <td>${escapeHtml(e.students.full_name)}</td>
-              <td><input type="radio" name="att-${e.id}" value="present" ${byEnrollment[e.id] === 'present' ? 'checked' : ''}></td>
-              <td><input type="radio" name="att-${e.id}" value="absent" ${byEnrollment[e.id] === 'absent' ? 'checked' : ''}></td>
-            </tr>`).join('')}
-        </tbody>
-      </table>
-      <div class="form-actions"><button type="button" class="btn btn-primary" id="save-attendance-btn">Save today's attendance</button></div>
-    </div>
-    <div class="card">
-      <h2 class="card-title">Term totals so far</h2>
-      <div id="attendance-totals"></div>
-    </div>
-  `;
-
-  document.getElementById('save-attendance-btn').addEventListener('click', async () => {
-    showLoading();
-    try {
-      const rows = Array.from(container.querySelectorAll('tbody tr')).map(row => {
-        const checked = row.querySelector('input:checked');
-        return checked ? {
-          enrollment_id: row.dataset.enrollmentId,
-          student_id: row.dataset.studentId,
-          date: today,
-          status: checked.value,
-          recorded_by: appState.user.id,
-        } : null;
-      }).filter(Boolean);
-
-      if (rows.length === 0) { showToast('Mark at least one student before saving.', 'error'); hideLoading(); return; }
-
-      const { error } = await supabaseClient.from('attendance').upsert(rows, { onConflict: 'enrollment_id,date' });
-      if (error) throw error;
-      showToast('Attendance saved.', 'success');
-      renderAttendanceTotals(enrollments, arm.id);
-    } catch (err) {
-      showToast(err.message || 'Could not save attendance.', 'error');
-    } finally {
-      hideLoading();
-    }
-  });
-
-  renderAttendanceTotals(enrollments, arm.id);
-}
-
-async function renderAttendanceTotals(enrollments, armId) {
-  const wrap = document.getElementById('attendance-totals');
-  if (!wrap) return;
-  const { data: allRecords } = await supabaseClient
-    .from('attendance').select('enrollment_id, status').in('enrollment_id', (enrollments || []).map(e => e.id));
-
-  wrap.innerHTML = `
-    <table class="data-table">
-      <thead><tr><th>Student</th><th>Present</th><th>Absent</th><th>%</th></tr></thead>
-      <tbody>
-        ${(enrollments || []).map(e => {
-          const records = (allRecords || []).filter(r => r.enrollment_id === e.id);
-          const present = records.filter(r => r.status === 'present').length;
-          const total = records.length;
-          const pct = total > 0 ? Math.round((present / total) * 100) : 0;
-          return `<tr><td>${escapeHtml(e.students.full_name)}</td><td>${present}</td><td>${total - present}</td><td>${pct}%</td></tr>`;
-        }).join('')}
-      </tbody>
-    </table>
-  `;
-}
-
-async function renderAdminAttendanceScreen(container) {
-  await refreshClassesWithArmsCache();
-  const allArms = classesWithArmsCache.flatMap(c => c.arms.map(a => ({ ...a, className: c.name })));
-  if (allArms.length === 0 || !appState.activeTermId) {
-    container.innerHTML = `<div class="card card-notice"><p>No classes or active term yet.</p></div>`;
-    return;
-  }
-  attendanceArmId = attendanceArmId || allArms[0].id;
-
-  container.innerHTML = `
-    <div class="card">
-      <label class="field-label">Class arm</label>
-      <select class="field-input" id="attendance-admin-arm-select">
-        ${allArms.map(a => `<option value="${a.id}" ${a.id === attendanceArmId ? 'selected' : ''}>${escapeHtml(a.className)} ${escapeHtml(a.name)}</option>`).join('')}
-      </select>
-    </div>
-    <div id="attendance-totals"></div>
-  `;
-
-  const loadForArm = async () => {
-    const { data: enrollments } = await supabaseClient
-      .from('enrollments').select('id, students(full_name)').eq('arm_id', attendanceArmId).eq('term_id', appState.activeTermId);
-    renderAttendanceTotals(enrollments, attendanceArmId);
-  };
-  document.getElementById('attendance-admin-arm-select').addEventListener('change', (e) => { attendanceArmId = e.target.value; loadForArm(); });
-  loadForArm();
-}
-
-async function renderParentAttendanceScreen(container) {
-  const { data: children } = await supabaseClient.from('students').select('id, full_name').eq('parent_id', appState.user.id);
-  if (!children || children.length === 0 || !appState.activeTermId) {
-    container.innerHTML = `<div class="card card-notice"><p>No children linked yet, or no active term.</p></div>`;
-    return;
-  }
-  let html = '';
-  for (const child of children) {
-    const { data: enrollment } = await supabaseClient
-      .from('enrollments').select('id').eq('student_id', child.id).eq('term_id', appState.activeTermId).maybeSingle();
-    if (!enrollment) { html += `<div class="card"><h2 class="card-title">${escapeHtml(child.full_name)}</h2><p class="view-subheading">Not enrolled this term.</p></div>`; continue; }
-    const { data: records } = await supabaseClient.from('attendance').select('status').eq('enrollment_id', enrollment.id);
-    const present = (records || []).filter(r => r.status === 'present').length;
-    const total = (records || []).length;
-    const pct = total > 0 ? Math.round((present / total) * 100) : 0;
-    html += `
-      <div class="card">
-        <h2 class="card-title">${escapeHtml(child.full_name)}</h2>
-        <dl class="kv-list">
-          <div><dt>Present</dt><dd>${present}</dd></div>
-          <div><dt>Absent</dt><dd>${total - present}</dd></div>
-          <div><dt>Attendance rate</dt><dd>${pct}%</dd></div>
-        </dl>
-      </div>`;
-  }
-  container.innerHTML = html;
 }
 
 /* ----------------------------------------------------------------------------
@@ -3357,160 +3648,46 @@ async function renderReadOnlyAnnouncementsScreen(container) {
     </div>`).join('');
 }
 
-/* ----------------------------------------------------------------------------
-   25. ACADEMIC CALENDAR (Phase 8)
-   ---------------------------------------------------------------------------- */
-async function loadCalendarScreen() {
-  const container = document.getElementById('calendar-content');
-  const sub = document.getElementById('calendar-subheading');
-  sub.textContent = appState.user.role === 'admin'
-    ? 'Add resumption dates, breaks, exams, holidays, and PTA meetings.'
-    : 'Upcoming school dates.';
+// Carries students forward automatically when switching to a term within the
+// SAME session that has no enrollments yet — e.g. First Term -> Second Term.
+// It never runs across a session boundary (that's what Promotions is for),
+// and it never overwrites an existing enrollment: if the target term already
+// has any rows, it's left alone so this is always safe to call.
+async function rolloverEnrollmentsToTerm(targetTermId, sessionId, sessionTerms) {
+  const { data: existing } = await supabaseClient
+    .from('enrollments').select('id').eq('term_id', targetTermId).limit(1);
+  if (existing && existing.length > 0) return 0; // already has enrollments — don't touch it
 
-  const { data: events } = await supabaseClient.from('calendar_events').select('*').order('start_date');
+  // Nearest earlier term in this same session (by start_date) that already
+  // has enrollments — that's what we roll forward from. Handles skipping
+  // straight to Third Term, or any term whose immediate predecessor was
+  // itself never populated.
+  const targetTerm = sessionTerms.find(t => t.id === targetTermId);
+  if (!targetTerm) return 0;
+  const earlierTerms = sessionTerms
+    .filter(t => t.id !== targetTermId && (t.start_date || '') <= (targetTerm.start_date || '9999-99-99'))
+    .sort((a, b) => (b.start_date || '').localeCompare(a.start_date || ''));
 
-  const adminForm = appState.user.role === 'admin' ? `
-    <div class="inline-form-card">
-      <h3>Add event</h3>
-      <form id="calendar-form">
-        <div class="form-grid">
-          <div><label class="field-label">Title</label><input class="field-input" id="cal-title" required></div>
-          <div><label class="field-label">Type</label>
-            <select class="field-input" id="cal-type">
-              <option value="resumption">Resumption</option>
-              <option value="break">Break</option>
-              <option value="exam">Exam period</option>
-              <option value="holiday">Holiday</option>
-              <option value="pta">PTA meeting</option>
-              <option value="other">Other</option>
-            </select>
-          </div>
-          <div><label class="field-label">Start date</label><input class="field-input" type="date" id="cal-start" required></div>
-          <div><label class="field-label">End date (optional)</label><input class="field-input" type="date" id="cal-end"></div>
-        </div>
-        <label class="field-label">Description</label>
-        <textarea class="field-input field-textarea" id="cal-description" rows="2"></textarea>
-        <div class="form-actions"><button type="submit" class="btn btn-primary">Add event</button></div>
-      </form>
-    </div>` : '';
-
-  container.innerHTML = `
-    ${adminForm}
-    <table class="data-table">
-      <thead><tr><th>Date</th><th>Title</th><th>Type</th><th>Description</th>${appState.user.role === 'admin' ? '<th></th>' : ''}</tr></thead>
-      <tbody>
-        ${(events || []).length === 0 ? `<tr class="empty-row"><td colspan="5">No events yet.</td></tr>` : events.map(e => `
-          <tr>
-            <td>${e.start_date}${e.end_date ? ` – ${e.end_date}` : ''}</td>
-            <td>${escapeHtml(e.title)}</td>
-            <td><span class="badge badge-navy">${escapeHtml(e.event_type || 'other')}</span></td>
-            <td>${escapeHtml(e.description || '—')}</td>
-            ${appState.user.role === 'admin' ? `<td><button type="button" class="icon-btn icon-btn-danger" data-delete-event="${e.id}">Delete</button></td>` : ''}
-          </tr>`).join('')}
-      </tbody>
-    </table>
-  `;
-
-  if (appState.user.role === 'admin') {
-    document.getElementById('calendar-form').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      showLoading();
-      try {
-        const { error } = await supabaseClient.from('calendar_events').insert({
-          title: document.getElementById('cal-title').value.trim(),
-          event_type: document.getElementById('cal-type').value,
-          start_date: document.getElementById('cal-start').value,
-          end_date: document.getElementById('cal-end').value || null,
-          description: document.getElementById('cal-description').value.trim(),
-          created_by: appState.user.id,
-        });
-        if (error) throw error;
-        showToast('Event added.', 'success');
-        loadCalendarScreen();
-      } catch (err) {
-        showToast(err.message || 'Could not add event.', 'error');
-      } finally {
-        hideLoading();
-      }
-    });
-    container.querySelectorAll('[data-delete-event]').forEach(btn => btn.addEventListener('click', async () => {
-      if (!confirm('Delete this event?')) return;
-      showLoading();
-      try {
-        const { error } = await supabaseClient.from('calendar_events').delete().eq('id', btn.dataset.deleteEvent);
-        if (error) throw error;
-        loadCalendarScreen();
-      } catch (err) {
-        showToast(err.message || 'Could not delete event.', 'error');
-      } finally {
-        hideLoading();
-      }
-    }));
+  let sourceEnrollments = [];
+  for (const t of earlierTerms) {
+    const { data } = await supabaseClient
+      .from('enrollments').select('student_id, class_id, arm_id').eq('term_id', t.id);
+    if (data && data.length > 0) { sourceEnrollments = data; break; }
   }
-}
+  if (sourceEnrollments.length === 0) return 0;
 
-/* ----------------------------------------------------------------------------
-   26. AUDIT LOG (Phase 8)
-   ---------------------------------------------------------------------------- */
-let auditLogOffset = 0;
-const AUDIT_LOG_PAGE_SIZE = 25;
+  const newRows = sourceEnrollments.map(e => ({
+    student_id: e.student_id,
+    session_id: sessionId,
+    term_id: targetTermId,
+    class_id: e.class_id,
+    arm_id: e.arm_id,
+    status: 'active',
+  }));
 
-async function loadAuditLogScreen() {
-  auditLogOffset = 0;
-  const container = document.getElementById('auditlog-content');
-  container.innerHTML = `
-    <div class="table-toolbar">
-      <select class="table-search" id="auditlog-table-filter">
-        <option value="">All tables</option>
-        <option value="results">results</option>
-        <option value="students">students</option>
-        <option value="staff">staff</option>
-        <option value="users">users</option>
-        <option value="promotions">promotions</option>
-      </select>
-      <span></span>
-    </div>
-    <table class="data-table">
-      <thead><tr><th>When</th><th>User</th><th>Action</th><th>Table</th><th>Record</th><th></th></tr></thead>
-      <tbody id="auditlog-body"></tbody>
-    </table>
-    <div class="form-actions"><button type="button" class="btn btn-ghost-dark" id="auditlog-load-more-btn">Load more</button></div>
-  `;
-  document.getElementById('auditlog-table-filter').addEventListener('change', () => { auditLogOffset = 0; document.getElementById('auditlog-body').innerHTML = ''; loadAuditLogPage(); });
-  document.getElementById('auditlog-load-more-btn').addEventListener('click', loadAuditLogPage);
-  loadAuditLogPage();
-}
-
-async function loadAuditLogPage() {
-  const tableFilter = document.getElementById('auditlog-table-filter').value;
-  let q = supabaseClient.from('audit_log').select('*, users(full_name)')
-    .order('created_at', { ascending: false })
-    .range(auditLogOffset, auditLogOffset + AUDIT_LOG_PAGE_SIZE - 1);
-  if (tableFilter) q = q.eq('table_name', tableFilter);
-  const { data, error } = await q;
-  if (error) { showToast(error.message, 'error'); return; }
-
-  const tbody = document.getElementById('auditlog-body');
-  (data || []).forEach(r => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>${new Date(r.created_at).toLocaleString()}</td>
-      <td>${escapeHtml(r.users?.full_name || 'System')}</td>
-      <td><span class="badge badge-navy">${escapeHtml(r.action_type)}</span></td>
-      <td>${escapeHtml(r.table_name)}</td>
-      <td style="font-family:var(--font-mono);font-size:11px;">${escapeHtml((r.record_id || '').slice(0, 8))}</td>
-      <td><button type="button" class="icon-btn" data-toggle-diff>Details</button></td>
-    `;
-    const diffRow = document.createElement('tr');
-    diffRow.className = 'hidden';
-    diffRow.innerHTML = `<td colspan="6"><pre style="white-space:pre-wrap;font-size:11px;background:var(--color-paper);padding:10px;border-radius:6px;">${escapeHtml(JSON.stringify({ old: r.old_value, new: r.new_value }, null, 2))}</pre></td>`;
-    tr.querySelector('[data-toggle-diff]').addEventListener('click', () => diffRow.classList.toggle('hidden'));
-    tbody.appendChild(tr);
-    tbody.appendChild(diffRow);
-  });
-
-  auditLogOffset += AUDIT_LOG_PAGE_SIZE;
-  document.getElementById('auditlog-load-more-btn').style.display = (data || []).length < AUDIT_LOG_PAGE_SIZE ? 'none' : '';
+  const { error } = await supabaseClient.from('enrollments').insert(newRows);
+  if (error) throw error;
+  return newRows.length;
 }
 
 /* ----------------------------------------------------------------------------
@@ -3520,7 +3697,44 @@ async function loadSettingsScreen() {
   const container = document.getElementById('settings-content');
   const s = appState.schoolSettings || {};
 
+  let termsCardHTML = `<div class="card card-notice"><p>No academic session set up yet — complete the Setup Wizard first.</p></div>`;
+  let terms = [];
+  if (appState.activeSessionId) {
+    const { data } = await supabaseClient
+      .from('terms')
+      .select('*')
+      .eq('session_id', appState.activeSessionId)
+      .order('start_date', { ascending: true, nullsFirst: true });
+    terms = data || [];
+
+    termsCardHTML = `
+      <div class="card">
+        <h2 class="card-title">Academic term</h2>
+        <p class="view-subheading">Only one term can be active at a time — it drives every screen in the app (results entry, report cards, dashboards). Switching is safe: past terms and their results, approvals, and report cards stay exactly as they are.</p>
+        <table class="data-table">
+          <thead><tr><th>Term</th><th>Dates</th><th>Result entry</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            ${terms.map(t => `
+              <tr>
+                <td>${escapeHtml(t.name)}</td>
+                <td>${t.start_date ? new Date(t.start_date).toLocaleDateString() : '—'} – ${t.end_date ? new Date(t.end_date).toLocaleDateString() : '—'}</td>
+                <td><span class="badge ${t.is_result_entry_open ? 'badge-success' : 'badge-error'}">${t.is_result_entry_open ? 'Open' : 'Closed'}</span>
+                  <button type="button" class="icon-btn" data-toggle-entry="${t.id}" data-open="${t.is_result_entry_open}">${t.is_result_entry_open ? 'Close' : 'Open'}</button>
+                </td>
+                <td>${t.is_current ? `<span class="badge badge-gold">Current</span>` : '—'}</td>
+                <td>${t.is_current ? '' : `<button type="button" class="icon-btn" data-make-active="${t.id}">Make active</button>`}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
   container.innerHTML = `
+    ${termsCardHTML}
+
+    <div id="previous-sessions-wrap"></div>
+
     <div class="card">
       <h2 class="card-title">Identity &amp; branding</h2>
       <div class="form-grid">
@@ -3549,17 +3763,80 @@ async function loadSettingsScreen() {
     </div>
 
     <div class="card">
+      <h2 class="card-title">Grading system</h2>
+      <p class="view-subheading">Define the score bands used to assign a grade and remark to every subject total (e.g. 70–100 = A). Overlapping or gapped ranges are the most common cause of wrong grades on report cards.</p>
+      <div id="grading-rules-rows" class="wizard-grading-rows"></div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-ghost-dark" id="add-grading-row-btn">+ Add band</button>
+        <button type="button" class="btn btn-primary" id="save-grading-btn">Save grading system</button>
+      </div>
+      <p class="field-error hidden" id="grading-form-error" role="alert"></p>
+      <p class="view-subheading" id="grading-recalc-note" style="margin-top:10px;"></p>
+    </div>
+
+    <div class="card">
       <h2 class="card-title">Backup / export</h2>
       <p class="view-subheading">Downloads a JSON snapshot of core data. Destructive actions elsewhere in the app already require confirmation, so this is for off-site backup, not undo.</p>
       <div class="form-actions" style="flex-wrap:wrap;">
         <button type="button" class="btn btn-ghost-dark" data-export="students">Export students</button>
         <button type="button" class="btn btn-ghost-dark" data-export="results">Export results</button>
         <button type="button" class="btn btn-ghost-dark" data-export="report_cards">Export report cards</button>
-        <button type="button" class="btn btn-ghost-dark" data-export="attendance">Export attendance</button>
-        <button type="button" class="btn btn-ghost-dark" data-export="audit_log">Export audit log</button>
       </div>
     </div>
   `;
+
+  await loadAndRenderGradingRules();
+  wireGradingRulesForm();
+
+  container.querySelectorAll('[data-make-active]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const term = terms.find(t => t.id === btn.dataset.makeActive);
+      if (!confirm(`Make "${term ? term.name : 'this term'}" the active term? Everyone will immediately see it as the current term app-wide. Students will automatically carry over into it from whichever term they were last enrolled in this session — nothing changes for them unless you transfer or promote them yourself. Result entry for it will need to be opened separately below if needed.`)) return;
+      showLoading();
+      try {
+        const { error: clearErr } = await supabaseClient
+          .from('terms').update({ is_current: false }).eq('session_id', appState.activeSessionId);
+        if (clearErr) throw clearErr;
+        const { error: setErr } = await supabaseClient
+          .from('terms').update({ is_current: true }).eq('id', btn.dataset.makeActive);
+        if (setErr) throw setErr;
+
+        const carriedOver = await rolloverEnrollmentsToTerm(btn.dataset.makeActive, appState.activeSessionId, terms);
+
+        setState({ activeTermId: btn.dataset.makeActive });
+        renderTopbarContext();
+        showToast(
+          carriedOver > 0
+            ? `${term ? term.name : 'Term'} is now active — ${carriedOver} student(s) carried over automatically, same class as before.`
+            : `${term ? term.name : 'Term'} is now the active term.`,
+          'success'
+        );
+        loadSettingsScreen();
+      } catch (err) {
+        showToast(err.message || 'Could not switch the active term.', 'error');
+      } finally {
+        hideLoading();
+      }
+    });
+  });
+
+  container.querySelectorAll('[data-toggle-entry]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const isOpen = btn.dataset.open === 'true';
+      showLoading();
+      try {
+        const { error } = await supabaseClient
+          .from('terms').update({ is_result_entry_open: !isOpen }).eq('id', btn.dataset.toggleEntry);
+        if (error) throw error;
+        showToast(`Result entry ${!isOpen ? 'opened' : 'closed'}.`, 'success');
+        loadSettingsScreen();
+      } catch (err) {
+        showToast(err.message || 'Could not update result entry.', 'error');
+      } finally {
+        hideLoading();
+      }
+    });
+  });
 
   document.getElementById('save-settings-btn').addEventListener('click', async () => {
     showLoading();
@@ -3621,6 +3898,281 @@ async function loadSettingsScreen() {
       hideLoading();
     }
   });
+
+  renderPreviousSessionsCard();
+}
+
+/* ----------------------------------------------------------------------------
+   27a. GRADING SYSTEM MANAGEMENT (Admin) — School Settings
+   Lets the admin view/add/remove/edit score bands after initial setup
+   (the wizard only ever ran once), and optionally recalculate the grade +
+   remark on every already-saved result to match corrected bands — this is
+   the fix for report cards showing the wrong letter grade for a score.
+   ---------------------------------------------------------------------------- */
+function addGradingRuleRow(prefill) {
+  const container = document.getElementById('grading-rules-rows');
+  const row = document.createElement('div');
+  row.className = 'wizard-grading-row';
+  const p = prefill || { min_score: '', max_score: '', grade: '', remark: '' };
+  row.innerHTML = `
+    <input class="field-input" data-field="min" type="number" placeholder="Min" value="${p.min_score}">
+    <input class="field-input" data-field="max" type="number" placeholder="Max" value="${p.max_score}">
+    <input class="field-input" data-field="grade" placeholder="Grade" value="${escapeHtml(p.grade || '')}">
+    <input class="field-input" data-field="remark" placeholder="Remark" value="${escapeHtml(p.remark || '')}">
+    <button type="button" class="wizard-remove-row-btn">Remove</button>
+  `;
+  row.querySelector('.wizard-remove-row-btn').addEventListener('click', () => row.remove());
+  container.appendChild(row);
+}
+
+async function loadAndRenderGradingRules() {
+  const container = document.getElementById('grading-rules-rows');
+  if (!container) return;
+  container.innerHTML = '';
+  const { data, error } = await supabaseClient
+    .from('grading_rules').select('*').is('session_id', null).order('min_score', { ascending: false });
+  if (error) { showToast(error.message, 'error'); return; }
+  if (!data || data.length === 0) {
+    addGradingRuleRow();
+  } else {
+    data.forEach(rule => addGradingRuleRow(rule));
+  }
+}
+
+function wireGradingRulesForm() {
+  const addBtn = document.getElementById('add-grading-row-btn');
+  const saveBtn = document.getElementById('save-grading-btn');
+  if (!addBtn || !saveBtn) return;
+
+  addBtn.onclick = () => addGradingRuleRow();
+
+  saveBtn.onclick = async () => {
+    const errorEl = document.getElementById('grading-form-error');
+    const note = document.getElementById('grading-recalc-note');
+    errorEl.classList.add('hidden');
+    note.textContent = '';
+
+    const rows = Array.from(document.querySelectorAll('#grading-rules-rows .wizard-grading-row')).map(row => ({
+      min_score: Number(row.querySelector('[data-field="min"]').value),
+      max_score: Number(row.querySelector('[data-field="max"]').value),
+      grade: row.querySelector('[data-field="grade"]').value.trim(),
+      remark: row.querySelector('[data-field="remark"]').value.trim(),
+    }));
+
+    if (rows.length === 0 || rows.some(r => !r.grade || !r.remark || Number.isNaN(r.min_score) || Number.isNaN(r.max_score))) {
+      errorEl.textContent = 'Every grading band needs a min, max, grade, and remark.';
+      errorEl.classList.remove('hidden');
+      return;
+    }
+    if (rows.some(r => r.min_score > r.max_score)) {
+      errorEl.textContent = 'Each band\'s min score must not be greater than its max score.';
+      errorEl.classList.remove('hidden');
+      return;
+    }
+    // Check for overlapping bands, e.g. 60-69 and 65-75 sharing 65-69.
+    const sorted = [...rows].sort((a, b) => a.min_score - b.min_score);
+    for (let i = 1; i < sorted.length; i++) {
+      if (sorted[i].min_score <= sorted[i - 1].max_score) {
+        errorEl.textContent = `Bands overlap: ${sorted[i - 1].min_score}–${sorted[i - 1].max_score} and ${sorted[i].min_score}–${sorted[i].max_score} both include ${sorted[i].min_score}. Fix the ranges so each score matches exactly one band.`;
+        errorEl.classList.remove('hidden');
+        return;
+      }
+    }
+
+    showLoading();
+    try {
+      const { error: delErr } = await supabaseClient.from('grading_rules').delete().is('session_id', null);
+      if (delErr) throw delErr;
+      const { error: insErr } = await supabaseClient.from('grading_rules').insert(rows);
+      if (insErr) throw insErr;
+
+      showToast('Grading system saved.', 'success');
+
+      // Recalculate grade + remark on every already-saved result to match the new bands.
+      const { data: results, error: resultsErr } = await supabaseClient
+        .from('results').select('id, total_score').not('total_score', 'is', null);
+      if (resultsErr) throw resultsErr;
+
+      // Group results by their new (grade, remark) pair so each distinct pair only
+      // needs ONE update call (touching many rows via .in()), instead of one call
+      // per row. Plain .update() is used — not .upsert() — because Postgres checks
+      // NOT NULL constraints on the upsert's underlying INSERT payload even when the
+      // row already exists and the statement really just falls through to an UPDATE.
+      const findBand = (score) => rows.find(r => score >= r.min_score && score <= r.max_score);
+      const groups = new Map(); // "grade|remark" -> [result ids]
+      (results || []).forEach(r => {
+        const band = findBand(r.total_score);
+        if (!band) return;
+        const key = `${band.grade}|||${band.remark}`;
+        if (!groups.has(key)) groups.set(key, { grade: band.grade, remark: band.remark, ids: [] });
+        groups.get(key).ids.push(r.id);
+      });
+
+      let updatedCount = 0;
+      const CHUNK = 300;
+      for (const { grade, remark, ids } of groups.values()) {
+        for (let i = 0; i < ids.length; i += CHUNK) {
+          const idChunk = ids.slice(i, i + CHUNK);
+          const { error: upErr } = await supabaseClient
+            .from('results').update({ grade, remark }).in('id', idChunk);
+          if (upErr) throw upErr;
+          updatedCount += idChunk.length;
+        }
+      }
+
+      note.textContent = updatedCount > 0
+        ? `Recalculated grade and remark on ${updatedCount} existing result(s) to match the new bands.`
+        : 'No existing results needed recalculating.';
+
+      loadAndRenderGradingRules();
+    } catch (err) {
+      errorEl.textContent = err.message || 'Could not save the grading system.';
+      errorEl.classList.remove('hidden');
+    } finally {
+      hideLoading();
+    }
+  };
+}
+
+/* ----------------------------------------------------------------------------
+   27b. PREVIOUS SESSIONS VIEWER (Admin) — School Settings
+   Read-only browsing of any session that isn't the currently active one:
+   pick a session, pick a term, pick a class, then preview any report
+   card that was ever generated for a student in that arm/term.
+   ---------------------------------------------------------------------------- */
+let prevSessionState = { sessionId: null, termId: null };
+
+async function renderPreviousSessionsCard() {
+  const wrap = document.getElementById('previous-sessions-wrap');
+  if (!wrap) return;
+
+  let query = supabaseClient.from('sessions').select('id, name').order('name', { ascending: false });
+  if (appState.activeSessionId) query = query.neq('id', appState.activeSessionId);
+  const { data: pastSessions } = await query;
+
+  if (!pastSessions || pastSessions.length === 0) {
+    wrap.innerHTML = `<div class="card card-notice"><p>No previous sessions yet — they'll appear here once you move to a new academic session.</p></div>`;
+    return;
+  }
+
+  if (!prevSessionState.sessionId || !pastSessions.some(s => s.id === prevSessionState.sessionId)) {
+    prevSessionState = { sessionId: pastSessions[0].id, termId: null };
+  }
+
+  wrap.innerHTML = `
+    <div class="card">
+      <h2 class="card-title">Previous sessions</h2>
+      <p class="view-subheading">Browse terms and report cards from a session that's no longer active.</p>
+      <label class="field-label" for="prev-session-select">Session</label>
+      <select class="field-input" id="prev-session-select">
+        ${pastSessions.map(s => `<option value="${s.id}" ${s.id === prevSessionState.sessionId ? 'selected' : ''}>${escapeHtml(s.name)}</option>`).join('')}
+      </select>
+      <div id="prev-session-terms-wrap" style="margin-top:14px;"></div>
+    </div>
+  `;
+
+  document.getElementById('prev-session-select').addEventListener('change', (e) => {
+    prevSessionState = { sessionId: e.target.value, termId: null };
+    renderPrevSessionTerms();
+  });
+
+  renderPrevSessionTerms();
+}
+
+async function renderPrevSessionTerms() {
+  const wrap = document.getElementById('prev-session-terms-wrap');
+  if (!wrap) return;
+  const { data: terms } = await supabaseClient
+    .from('terms').select('id, name, start_date, end_date')
+    .eq('session_id', prevSessionState.sessionId)
+    .order('start_date', { ascending: true, nullsFirst: true });
+
+  wrap.innerHTML = `
+    <table class="data-table">
+      <thead><tr><th>Term</th><th>Dates</th><th></th></tr></thead>
+      <tbody>
+        ${(terms || []).map(t => `
+          <tr>
+            <td>${escapeHtml(t.name)}</td>
+            <td>${t.start_date ? new Date(t.start_date).toLocaleDateString() : '—'} – ${t.end_date ? new Date(t.end_date).toLocaleDateString() : '—'}</td>
+            <td><button type="button" class="icon-btn" data-view-prev-term="${t.id}">View classes &amp; report cards</button></td>
+          </tr>`).join('') || '<tr class="empty-row"><td colspan="3">No terms recorded.</td></tr>'}
+      </tbody>
+    </table>
+    <div id="prev-session-arms-wrap" style="margin-top:14px;"></div>
+  `;
+
+  wrap.querySelectorAll('[data-view-prev-term]').forEach(btn => {
+    btn.addEventListener('click', () => { prevSessionState.termId = btn.dataset.viewPrevTerm; renderPrevSessionArms(); });
+  });
+
+  if (prevSessionState.termId && (terms || []).some(t => t.id === prevSessionState.termId)) {
+    renderPrevSessionArms();
+  }
+}
+
+async function renderPrevSessionArms() {
+  const wrap = document.getElementById('prev-session-arms-wrap');
+  if (!wrap) return;
+
+  const { data: enrollments } = await supabaseClient
+    .from('enrollments').select('id, arm_id, classes(name), class_arms(name)').eq('term_id', prevSessionState.termId);
+
+  const armGroups = {};
+  (enrollments || []).forEach(e => {
+    if (!armGroups[e.arm_id]) {
+      armGroups[e.arm_id] = { armId: e.arm_id, className: e.classes?.name || '—', armName: e.class_arms?.name || '', enrollmentIds: [] };
+    }
+    armGroups[e.arm_id].enrollmentIds.push(e.id);
+  });
+  const groups = Object.values(armGroups);
+
+  if (groups.length === 0) {
+    wrap.innerHTML = `<p class="view-subheading">No students were enrolled in this term.</p>`;
+    return;
+  }
+
+  wrap.innerHTML = `
+    <label class="field-label" for="prev-arm-select">Class</label>
+    <select class="field-input" id="prev-arm-select" style="max-width:280px;">
+      ${groups.map(g => `<option value="${g.armId}">${escapeHtml(g.className)}</option>`).join('')}
+    </select>
+    <div id="prev-arm-students-wrap" style="margin-top:12px;"></div>
+  `;
+
+  const showArm = async (armId) => {
+    const group = groups.find(g => g.armId === armId);
+    const { data: enr } = await supabaseClient.from('enrollments').select('id, students(full_name)').in('id', group.enrollmentIds);
+    const { data: cards } = await supabaseClient.from('report_cards').select('*').eq('is_annual', false).in('enrollment_id', group.enrollmentIds);
+    const cardByEnrollment = {};
+    (cards || []).forEach(c => { cardByEnrollment[c.enrollment_id] = c; });
+
+    const studentsWrap = document.getElementById('prev-arm-students-wrap');
+    studentsWrap.innerHTML = `
+      <table class="data-table">
+        <thead><tr><th>Student</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+          ${(enr || []).map(e => {
+            const card = cardByEnrollment[e.id];
+            const label = !card ? 'No report card' : card.published_at ? 'Published' : 'Generated, not published';
+            const badge = !card ? 'badge-error' : card.published_at ? 'badge-success' : 'badge-navy';
+            return `
+              <tr>
+                <td>${escapeHtml(e.students.full_name)}</td>
+                <td><span class="badge ${badge}">${label}</span></td>
+                <td>${card ? `<button type="button" class="icon-btn" data-prev-preview="${card.id}">Preview</button>` : ''}</td>
+              </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    `;
+    studentsWrap.querySelectorAll('[data-prev-preview]').forEach(btn => {
+      btn.addEventListener('click', () => openReportCardPreview(btn.dataset.prevPreview));
+    });
+  };
+
+  document.getElementById('prev-arm-select').addEventListener('change', (e) => showArm(e.target.value));
+  showArm(groups[0].armId);
 }
 
 async function exportTableAsJSON(table) {
