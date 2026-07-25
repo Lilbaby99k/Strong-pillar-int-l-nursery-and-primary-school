@@ -326,7 +326,7 @@ input { font-family: inherit; }
 
 .wizard-repeat-rows { display: flex; flex-direction: column; gap: 10px; margin: 8px 0 14px; }
 .wizard-repeat-row {
-  display: grid; grid-template-columns: 1fr 1fr auto; gap: 10px; align-items: center;
+  display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center;
 }
 .wizard-remove-row-btn {
   background: none; border: 1px solid var(--color-border); border-radius: var(--radius-sm);
@@ -463,6 +463,32 @@ input { font-family: inherit; }
 }
 .score-input:disabled { background: var(--color-paper); color: var(--color-slate); }
 .rejection-note { font-size: 12px; color: var(--color-error); margin-top: 4px; }
+
+/* ============================================================================
+   GENERIC MODAL (session rollover prompt + new session wizard)
+   ============================================================================ */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(30, 27, 22, 0.72);
+  z-index: 1300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  overflow-y: auto;
+}
+.modal-card {
+  background: var(--color-surface);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+  padding: 28px 30px;
+  max-width: 460px;
+  width: 100%;
+}
+.modal-card-wide { max-width: 640px; }
+.modal-title { font-family: var(--font-display); font-size: 20px; margin-bottom: 10px; }
+.modal-body { font-size: 14px; color: var(--color-slate); line-height: 1.5; margin-bottom: 18px; }
 
 /* ============================================================================
    REPORT CARD OVERLAY & PRINTABLE LAYOUT
