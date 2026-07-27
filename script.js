@@ -16,6 +16,12 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // name throws "Identifier has already been declared".
 const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+// The Google Apps Script Web App that sends every email this system sends
+// (invites, welcome notes, approval/publish alerts, announcements, and
+// "Forgot password?" OTP codes) — see Code.gs. Hardcoded rather than a
+// School Settings field so this just works with no admin setup step.
+const APPS_SCRIPT_WEBHOOK_URL = 'https://script.google.com/macros/s/AKfycby4FQOfhVTy5gNK5ZmQqdI8pcMPVe1kj5tdNyS-0CL_s0OmJ_1oO0AqSnRatcjMJRepzw/exec';
+
 /* ----------------------------------------------------------------------------
    2. SINGLE IN-MEMORY APP STATE
    One object drives the whole UI. Nothing else should hold app data in a
@@ -91,9 +97,25 @@ function showToast(message, type = 'default') {
 /* ----------------------------------------------------------------------------
    5. AUTH FLOW
    ---------------------------------------------------------------------------- */
+// Supabase Auth needs an email to sign a user up/in — there's no SMS provider
+// configured for real phone-based auth here. So a parent who registers
+// without an email gets a synthetic one derived from their phone number,
+// and can sign back in by typing that same phone number in the "email"
+// field on the login screen. Not a real address; never shown to them.
+function normalizePhone(phone) {
+  return (phone || '').replace(/\D/g, '');
+}
+function phoneToSyntheticEmail(phone) {
+  return `p${normalizePhone(phone)}@parent.internal`;
+}
+function looksLikeEmail(value) {
+  return /\S+@\S+\.\S+/.test(value);
+}
+
 async function handleLoginSubmit(event) {
   event.preventDefault();
-  const email = document.getElementById('login-email').value.trim();
+  const rawInput = document.getElementById('login-email').value.trim();
+  const email = looksLikeEmail(rawInput) ? rawInput : phoneToSyntheticEmail(rawInput);
   const password = document.getElementById('login-password').value;
   const errorEl = document.getElementById('login-error');
   const submitBtn = document.getElementById('login-submit-btn');
@@ -316,30 +338,324 @@ async function handleLogout() {
   showView('login');
 }
 
-async function handleForgotPassword() {
-  const email = document.getElementById('login-email').value.trim();
-  if (!email) {
-    showToast('Enter your email above first, then click "Forgot password?"', 'error');
+/* ---- Forgot password — OTP flow via Google Apps Script --------------------
+   Replaces Supabase's own resetPasswordForEmail() link-based flow. The
+   Apps Script webhook (School Settings > Email notifications) is the ONLY
+   thing that sends this email now. Step 1 emails a 6-digit code; step 2
+   sends the code + new password back to the same webhook, which verifies
+   the code and changes the password via Supabase's Admin API — the
+   anon key this page uses can't change another session's password, so
+   that step has to happen server-side, inside the Apps Script.
+   ---------------------------------------------------------------------------- */
+const resetFlowState = { email: null };
+
+function resetPasswordResetForm() {
+  document.getElementById('reset-form-subtitle').textContent =
+    "Enter your email (or phone, if that's how you sign in) and we'll email you a 6-digit code.";
+  document.getElementById('reset-request-form').classList.remove('hidden');
+  document.getElementById('reset-confirm-form').classList.add('hidden');
+  document.getElementById('reset-resend-btn').classList.add('hidden');
+  document.getElementById('reset-request-error').classList.add('hidden');
+  document.getElementById('reset-confirm-error').classList.add('hidden');
+  document.getElementById('reset-confirm-notice').classList.add('hidden');
+  document.getElementById('reset-email').value = '';
+  document.getElementById('reset-otp').value = '';
+  document.getElementById('reset-new-password').value = '';
+  document.getElementById('reset-new-password-confirm').value = '';
+  resetFlowState.email = null;
+}
+
+async function handleResetRequestSubmit(event) {
+  event.preventDefault();
+  const errorEl = document.getElementById('reset-request-error');
+  const btn = document.getElementById('reset-request-btn');
+  errorEl.classList.add('hidden');
+
+  const webhookUrl = APPS_SCRIPT_WEBHOOK_URL;
+  if (!webhookUrl) {
+    errorEl.textContent = "Password reset isn't set up for this school yet. Contact the administrator.";
+    errorEl.classList.remove('hidden');
     return;
   }
+
+  const rawInput = document.getElementById('reset-email').value.trim();
+  if (!rawInput) {
+    errorEl.textContent = 'Enter your email or phone number.';
+    errorEl.classList.remove('hidden');
+    return;
+  }
+  const email = looksLikeEmail(rawInput) ? rawInput : phoneToSyntheticEmail(rawInput);
+
+  btn.disabled = true;
   showLoading();
-  const { error } = await supabaseClient.auth.resetPasswordForEmail(email);
-  hideLoading();
-  if (error) {
-    showToast(error.message, 'error');
-  } else {
-    showToast('Password reset instructions sent to your email.', 'success');
+  try {
+    const res = await fetch(webhookUrl, { method: 'POST', body: JSON.stringify({ type: 'otp_request', email }) });
+    if (!res.ok) {
+      // A non-2xx here (e.g. 403) almost always means the Apps Script Web
+      // App deployment's access isn't set to "Anyone" — Google intercepts
+      // the request with a permission page before doPost() ever runs, so
+      // there's no useful JSON body to parse. Surface the status so this
+      // doesn't get mistaken for a code/expiry issue during support.
+      throw new Error(`The email service rejected the request (HTTP ${res.status}). Contact the administrator — the Apps Script webhook deployment may need its access permissions fixed.`);
+    }
+    const data = await res.json().catch(() => null);
+    if (data && data.error) throw new Error(data.error);
+
+    resetFlowState.email = email;
+    document.getElementById('reset-request-form').classList.add('hidden');
+    document.getElementById('reset-confirm-form').classList.remove('hidden');
+    document.getElementById('reset-resend-btn').classList.remove('hidden');
+    document.getElementById('reset-form-subtitle').textContent =
+      `If an account exists for ${rawInput}, a 6-digit code was just emailed. Enter it below with your new password.`;
+  } catch (err) {
+    // fetch() itself throws a generic "TypeError: Failed to fetch" when the
+    // request is blocked by CORS or otherwise never reaches a server (as
+    // opposed to reaching it and getting a non-2xx status, handled above).
+    // That's indistinguishable from a dead network in the browser's own
+    // message, so translate it into something actionable rather than
+    // showing "Failed to fetch" verbatim.
+    if (err instanceof TypeError) {
+      errorEl.textContent = "Could not reach the email service (blocked by the browser). Contact the administrator — the Apps Script webhook deployment's access permissions likely need fixing.";
+    } else {
+      errorEl.textContent = err.message || 'Could not send the code right now. Please try again.';
+    }
+    errorEl.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+    hideLoading();
   }
 }
 
-/* ---- Activate-account & contact-form toggles ------------------------------ */
+async function handleResetConfirmSubmit(event) {
+  event.preventDefault();
+  const errorEl = document.getElementById('reset-confirm-error');
+  const noticeEl = document.getElementById('reset-confirm-notice');
+  errorEl.classList.add('hidden');
+  noticeEl.classList.add('hidden');
+
+  if (!resetFlowState.email) {
+    errorEl.textContent = 'Something went wrong — start over with "Forgot password?"';
+    errorEl.classList.remove('hidden');
+    return;
+  }
+  const otp = document.getElementById('reset-otp').value.trim();
+  const newPassword = document.getElementById('reset-new-password').value;
+  const confirmPassword = document.getElementById('reset-new-password-confirm').value;
+
+  if (!/^\d{6}$/.test(otp)) {
+    errorEl.textContent = 'Enter the 6-digit code from your email.';
+    errorEl.classList.remove('hidden');
+    return;
+  }
+  if (newPassword.length < 8) {
+    errorEl.textContent = 'Password must be at least 8 characters.';
+    errorEl.classList.remove('hidden');
+    return;
+  }
+  if (newPassword !== confirmPassword) {
+    errorEl.textContent = 'Passwords do not match.';
+    errorEl.classList.remove('hidden');
+    return;
+  }
+
+  const webhookUrl = APPS_SCRIPT_WEBHOOK_URL;
+  const btn = document.getElementById('reset-confirm-btn');
+  btn.disabled = true;
+  showLoading();
+  try {
+    const res = await fetch(webhookUrl, {
+      method: 'POST',
+      body: JSON.stringify({ type: 'otp_verify', email: resetFlowState.email, otp, newPassword }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!data || !data.success) throw new Error((data && data.error) || 'That code is invalid or has expired.');
+
+    noticeEl.textContent = 'Password reset. You can sign in with it now.';
+    noticeEl.classList.remove('hidden');
+    setTimeout(() => showResetForm(false), 1800);
+  } catch (err) {
+    errorEl.textContent = err.message || 'Could not reset your password.';
+    errorEl.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+    hideLoading();
+  }
+}
+
+/* ---- Activate-account, register, reset, & contact-form toggles ----------- */
 function showLoginPanel(panel) {
   document.querySelector('.login-form-pane > .login-form-card').classList.toggle('hidden', panel !== 'signin');
   document.getElementById('activate-form-card').classList.toggle('hidden', panel !== 'activate');
+  document.getElementById('register-form-card').classList.toggle('hidden', panel !== 'register');
   document.getElementById('contact-form-card').classList.toggle('hidden', panel !== 'contact');
+  document.getElementById('reset-form-card').classList.toggle('hidden', panel !== 'reset');
 }
 function showActivateForm(show) { showLoginPanel(show ? 'activate' : 'signin'); }
+function showRegisterForm(show) {
+  showLoginPanel(show ? 'register' : 'signin');
+  if (show) resetRegisterForm();
+}
 function showContactForm(show) { showLoginPanel(show ? 'contact' : 'signin'); }
+function showResetForm(show) {
+  showLoginPanel(show ? 'reset' : 'signin');
+  if (show) resetPasswordResetForm();
+}
+
+/* ---- Parent self-registration ---------------------------------------------
+   Parts 4-6 of the module spec: a parent creates their OWN account (no admin
+   step) and links it to one or more children by admission number. Linking is
+   verified server-side by link_parent_to_student() (see the migration SQL) —
+   it checks the admission number exists, isn't graduated, and that the phone
+   on this registration matches the phone on file for that student, then sets
+   students.parent_id = this new user, all inside a SECURITY DEFINER function
+   so a brand-new account can't otherwise read or edit the students table.
+   ---------------------------------------------------------------------------- */
+function renderRegisterChildRows() {
+  const count = Number(document.getElementById('register-child-count').value);
+  const container = document.getElementById('register-children-rows');
+  const current = container.querySelectorAll('.wizard-repeat-row').length;
+  if (count > current) {
+    for (let i = current; i < count; i++) addRegisterChildRow();
+  } else if (count < current) {
+    const rows = container.querySelectorAll('.wizard-repeat-row');
+    for (let i = current - 1; i >= count; i--) rows[i].remove();
+  }
+}
+
+function addRegisterChildRow() {
+  const container = document.getElementById('register-children-rows');
+  const row = document.createElement('div');
+  row.className = 'wizard-repeat-row';
+  row.innerHTML = `
+    <input class="field-input" placeholder="Child's admission number (e.g. PS202600001)" data-admission-input>
+    <button type="button" class="wizard-remove-row-btn">Remove</button>
+  `;
+  row.querySelector('.wizard-remove-row-btn').addEventListener('click', () => {
+    row.remove();
+    document.getElementById('register-child-count').value = Math.max(1,
+      document.getElementById('register-children-rows').querySelectorAll('.wizard-repeat-row').length);
+  });
+  container.appendChild(row);
+}
+
+function resetRegisterForm() {
+  document.getElementById('register-form').reset();
+  document.getElementById('register-children-rows').innerHTML = '';
+  document.getElementById('register-error').classList.add('hidden');
+  document.getElementById('register-notice').classList.add('hidden');
+  renderRegisterChildRows();
+}
+
+async function handleRegisterSubmit(event) {
+  event.preventDefault();
+  const errorEl = document.getElementById('register-error');
+  const noticeEl = document.getElementById('register-notice');
+  errorEl.classList.add('hidden');
+  noticeEl.classList.add('hidden');
+
+  const fullName = document.getElementById('register-full-name').value.trim();
+  const phone = document.getElementById('register-phone').value.trim();
+  const email = document.getElementById('register-email').value.trim();
+  const password = document.getElementById('register-password').value;
+  const passwordConfirm = document.getElementById('register-password-confirm').value;
+  const admissionNumbers = Array.from(document.querySelectorAll('#register-children-rows [data-admission-input]'))
+    .map(i => i.value.trim())
+    .filter(Boolean);
+
+  if (!email) {
+    errorEl.textContent = 'Email is required.';
+    errorEl.classList.remove('hidden');
+    return;
+  }
+  if (!looksLikeEmail(email)) {
+    errorEl.textContent = 'Enter a valid email address.';
+    errorEl.classList.remove('hidden');
+    return;
+  }
+  if (password.length < 8) {
+    errorEl.textContent = 'Password must be at least 8 characters.';
+    errorEl.classList.remove('hidden');
+    return;
+  }
+  if (password !== passwordConfirm) {
+    errorEl.textContent = 'Passwords do not match.';
+    errorEl.classList.remove('hidden');
+    return;
+  }
+  if (admissionNumbers.length === 0) {
+    errorEl.textContent = "Enter at least one child's admission number.";
+    errorEl.classList.remove('hidden');
+    return;
+  }
+
+  showLoading();
+  try {
+    const { data: signUpData, error: signUpErr } = await supabaseClient.auth.signUp({ email, password });
+    if (signUpErr) throw signUpErr;
+    const authUser = signUpData.user;
+    if (!authUser) throw new Error('Could not create your account. Please try again.');
+
+    const { error: userErr } = await supabaseClient.from('users').insert({
+      id: authUser.id, role: 'parent', full_name: fullName, email, phone,
+    });
+    if (userErr) throw userErr;
+
+    const { error: parentErr } = await supabaseClient.from('parents').insert({ id: authUser.id });
+    if (parentErr) throw parentErr;
+
+    sendAppsScriptEmail({
+      to: email,
+      subject: `Your ${appState.schoolSettings?.school_name || 'school'} account has been created`,
+      body: `Hello ${fullName},\n\nYour parent account has been created successfully. You can sign in anytime with this email and the password you just chose to view your child's report cards and school announcements.\n\n— ${appState.schoolSettings?.school_name || 'The school'}`,
+    });
+
+    const results = [];
+    for (const admissionNumber of admissionNumbers) {
+      const { data: linkResult, error: linkErr } = await supabaseClient
+        .rpc('link_parent_to_student', {
+          p_admission_number: admissionNumber,
+          p_phone: phone,
+          p_parent_name: fullName,
+          p_parent_email: email,
+        });
+      if (linkErr) {
+        results.push({ admissionNumber, success: false, error: linkErr.message });
+      } else {
+        results.push({ admissionNumber, ...linkResult });
+      }
+    }
+
+    const linked = results.filter(r => r.success);
+    const failed = results.filter(r => !r.success);
+
+    let summary = '';
+    if (linked.length > 0) {
+      summary += `Linked: ${linked.map(r => r.full_name || r.admissionNumber).join(', ')}. `;
+    }
+    if (failed.length > 0) {
+      summary += `Could not link — ${failed.map(r => `${r.admissionNumber} (${r.error})`).join('; ')}. You can try again later from your dashboard.`;
+    }
+
+    // Whether or not signUp requires email confirmation, try to sign in
+    // immediately — if email confirmation is on, this will simply fail
+    // gracefully and the account still exists for later activation.
+    const { data: signInData, error: signInErr } = await supabaseClient.auth.signInWithPassword({ email, password });
+    if (signInErr) {
+      noticeEl.textContent = `Account created. ${summary} Check your email to confirm your account, then sign in.`;
+      noticeEl.classList.remove('hidden');
+      showLoginPanel('signin');
+      return;
+    }
+
+    showToast(`Welcome! ${summary}`.trim(), linked.length > 0 ? 'success' : 'error');
+    await loadUserProfileAndEnterApp(signInData.user);
+  } catch (err) {
+    errorEl.textContent = err.message || 'Could not create your account.';
+    errorEl.classList.remove('hidden');
+  } finally {
+    hideLoading();
+  }
+}
 
 async function handleContactSubmit(event) {
   event.preventDefault();
@@ -351,7 +667,7 @@ async function handleContactSubmit(event) {
   errorEl.classList.add('hidden');
   noticeEl.classList.add('hidden');
 
-  const webhookUrl = appState.schoolSettings?.apps_script_webhook_url;
+  const webhookUrl = APPS_SCRIPT_WEBHOOK_URL;
   const sendTo = appState.schoolSettings?.email;
   if (!webhookUrl || !sendTo) {
     errorEl.textContent = "This school hasn't set up its contact form yet. Please reach them directly.";
@@ -442,6 +758,18 @@ function enterAppShell() {
   subscribeToActiveTermChanges();
   navigateTo('dashboard');
   if (appState.user.role === 'admin') checkSessionRolloverPrompt();
+
+  const pendingRc = sessionStorage.getItem('pendingReportCardId');
+  if (pendingRc) {
+    sessionStorage.removeItem('pendingReportCardId');
+    openReportCardPreview(pendingRc);
+  }
+}
+
+// Builds the link an emailed "report card published" notification points
+// to — opens straight to that report card once the recipient signs in.
+function reportCardLinkURL(reportCardId) {
+  return `${window.location.origin}${window.location.pathname}?rc=${reportCardId}`;
 }
 
 /* ----------------------------------------------------------------------------
@@ -904,12 +1232,25 @@ function escapeHtml(str) {
 // request", which is what lets Apps Script Web Apps accept it without a
 // preflight OPTIONS call.
 async function sendAppsScriptEmail(payload) {
-  const url = appState.schoolSettings?.apps_script_webhook_url;
+  const url = APPS_SCRIPT_WEBHOOK_URL;
   if (!url) return;
   try {
-    await fetch(url, { method: 'POST', body: JSON.stringify(payload) });
+    await fetch(url, { method: 'POST', body: JSON.stringify({ type: 'notify', ...payload }) });
   } catch (err) {
     console.warn('Email notification failed to send:', err);
+  }
+}
+
+// Same subject/body to many recipients at once (announcements). The Apps
+// Script sends them one at a time server-side so one bad address can't
+// block the rest — see Code.gs's handleBulk().
+async function sendAppsScriptBulkEmail({ recipients, subject, body }) {
+  const url = APPS_SCRIPT_WEBHOOK_URL;
+  if (!url || !recipients || recipients.length === 0) return;
+  try {
+    await fetch(url, { method: 'POST', body: JSON.stringify({ type: 'bulk', recipients, subject, body }) });
+  } catch (err) {
+    console.warn('Bulk email notification failed to send:', err);
   }
 }
 
@@ -1580,14 +1921,14 @@ async function loadStudentsScreen() {
 
   const { data: students, error } = await supabaseClient
     .from('students')
-    .select('id, admission_number, full_name, gender, date_of_birth, passport_url, parent_id');
+    .select('id, admission_number, full_name, gender, date_of_birth, passport_url, parent_id, parent_name, parent_phone, parent_email');
   if (error) { showToast(error.message, 'error'); return; }
 
   const { data: parents } = await supabaseClient.from('parents').select('id, users(full_name, email)');
-  const parentNameById = {};
-  const parentEmailById = {};
+  const linkedParentNameById = {};
+  const linkedParentEmailById = {};
   (parents || []).forEach(p => {
-    if (p.users) { parentNameById[p.id] = p.users.full_name; parentEmailById[p.id] = p.users.email; }
+    if (p.users) { linkedParentNameById[p.id] = p.users.full_name; linkedParentEmailById[p.id] = p.users.email; }
   });
 
   let enrollmentsQuery = supabaseClient
@@ -1606,11 +1947,14 @@ async function loadStudentsScreen() {
     date_of_birth: s.date_of_birth,
     passport_url: s.passport_url,
     parent_id: s.parent_id,
-    parent_email: s.parent_id ? (parentEmailById[s.parent_id] || '') : '',
+    parent_name: s.parent_name || '',
+    parent_phone: s.parent_phone || '',
+    parent_contact_email: s.parent_email || '',
+    linked_parent_email: s.parent_id ? (linkedParentEmailById[s.parent_id] || '') : '',
     class_arm: enrollmentByStudent[s.id]
       ? (enrollmentByStudent[s.id].classes?.name || '—')
       : 'Not enrolled this term',
-    parent_name: s.parent_id ? (parentNameById[s.parent_id] || '—') : 'Unlinked',
+    display_parent_name: s.parent_id ? (linkedParentNameById[s.parent_id] || s.parent_name || '—') : (s.parent_name || 'Unlinked'),
   }));
 
   renderStudentTable(studentCache);
@@ -1631,7 +1975,7 @@ function renderStudentTable(rows) {
       <td>${escapeHtml(r.full_name)}</td>
       <td>${escapeHtml(r.gender || '—')}</td>
       <td>${escapeHtml(r.class_arm)}</td>
-      <td>${escapeHtml(r.parent_name)}</td>
+      <td>${escapeHtml(r.display_parent_name)}${r.parent_id ? ' <span class="badge badge-success">Linked</span>' : ''}</td>
       <td>
         <button type="button" class="icon-btn" data-edit-student="${r.id}">Edit</button>
         <button type="button" class="icon-btn" data-transfer="${r.id}">Transfer</button>
@@ -1657,7 +2001,10 @@ function openStudentEditForm(row) {
   document.getElementById('student-full-name').value = row.full_name || '';
   document.getElementById('student-gender').value = row.gender || 'Male';
   document.getElementById('student-dob').value = row.date_of_birth || '';
-  document.getElementById('student-parent-email').value = row.parent_email || '';
+  document.getElementById('student-parent-name').value = row.parent_name || '';
+  document.getElementById('student-parent-phone').value = row.parent_phone || '';
+  document.getElementById('student-parent-contact-email').value = row.parent_contact_email || '';
+  document.getElementById('student-existing-parent-email').value = row.linked_parent_email || '';
   document.getElementById('student-passport-file').value = '';
 
   document.getElementById('student-class-group').classList.add('hidden');
@@ -1715,10 +2062,75 @@ async function openTransferPrompt(studentId) {
   }
 }
 
+// Part 3 of the parent self-registration spec: an admission list the school
+// can hand to parents (WhatsApp, email, printed) so they have the admission
+// number they'll need to self-register — CSV and print need no library;
+// .xlsx uses the SheetJS CDN script tag added in index.html.
+function exportAdmissionList(format) {
+  const rows = studentCache.map(s => ({
+    'Admission Number': s.admission_number,
+    'Student Name': s.full_name,
+    'Class': s.class_arm,
+    'Parent Name': s.parent_name || '',
+    'Parent Phone': s.parent_phone || '',
+  }));
+  if (rows.length === 0) { showToast('No students to export yet.', 'error'); return; }
+
+  const filenameBase = `admission-list-${new Date().toISOString().slice(0, 10)}`;
+
+  if (format === 'csv') {
+    const headers = Object.keys(rows[0]);
+    const csvEscape = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const csv = [headers.join(','), ...rows.map(r => headers.map(h => csvEscape(r[h])).join(','))].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `${filenameBase}.csv`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  } else if (format === 'xlsx') {
+    if (typeof XLSX === 'undefined') { showToast('Excel export library failed to load — try CSV instead.', 'error'); return; }
+    const sheet = XLSX.utils.json_to_sheet(rows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, sheet, 'Admission List');
+    XLSX.writeFile(workbook, `${filenameBase}.xlsx`);
+  } else if (format === 'print') {
+    const win = window.open('', '_blank');
+    const tableRows = rows.map(r => `<tr><td>${escapeHtml(r['Admission Number'])}</td><td>${escapeHtml(r['Student Name'])}</td><td>${escapeHtml(r['Class'])}</td><td>${escapeHtml(r['Parent Name'])}</td><td>${escapeHtml(r['Parent Phone'])}</td></tr>`).join('');
+    win.document.write(`
+      <html><head><title>Admission List</title>
+      <style>
+        body { font-family: Arial, sans-serif; padding: 24px; }
+        h1 { font-size: 18px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+        th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; font-size: 13px; }
+        th { background: #f0f0f0; }
+      </style></head>
+      <body>
+        <h1>${escapeHtml(appState.schoolSettings?.school_name || 'School')} — Admission List</h1>
+        <table><thead><tr><th>Admission Number</th><th>Student Name</th><th>Class</th><th>Parent Name</th><th>Parent Phone</th></tr></thead>
+        <tbody>${tableRows}</tbody></table>
+      </body></html>
+    `);
+    win.document.close();
+    win.focus();
+    win.print();
+  }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('student-add-btn').addEventListener('click', () => {
     resetStudentForm();
     toggleInlineForm('student-form-card', true);
+  });
+  document.getElementById('student-export-btn').addEventListener('click', () => {
+    document.getElementById('student-export-menu').classList.toggle('hidden');
+  });
+  document.querySelectorAll('#student-export-menu [data-export-format]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.getElementById('student-export-menu').classList.add('hidden');
+      exportAdmissionList(btn.dataset.exportFormat);
+    });
   });
   document.getElementById('student-form-cancel').addEventListener('click', () => {
     resetStudentForm();
@@ -1743,29 +2155,46 @@ document.addEventListener('DOMContentLoaded', () => {
 
     showLoading();
     try {
-      const parentEmail = document.getElementById('student-parent-email').value.trim();
-      let parentId = null;
-      if (parentEmail) {
+      // Only touched if the admin explicitly enters an already-registered
+      // parent's email here — otherwise an existing link (most commonly set
+      // by the parent's own self-registration) is left completely alone.
+      const existingParentEmail = document.getElementById('student-existing-parent-email').value.trim();
+      let parentIdOverride; // undefined = don't touch; null/string = set explicitly
+      let linkedParentProfile = null; // { full_name, phone, email } of the parent just linked, if any
+      if (existingParentEmail) {
         const { data: parentUser } = await supabaseClient
-          .from('users').select('id').eq('email', parentEmail).eq('role', 'parent').maybeSingle();
+          .from('users').select('id, full_name, phone, email').eq('email', existingParentEmail).eq('role', 'parent').maybeSingle();
         if (parentUser) {
-          parentId = parentUser.id;
+          parentIdOverride = parentUser.id;
+          linkedParentProfile = parentUser;
         } else {
-          showToast('No parent found with that email — student saved without a linked parent.', 'error');
+          showToast('No parent found with that email — student saved without linking to that account.', 'error');
         }
       }
 
+      // If the admin left a contact field blank, and we just linked a parent
+      // account, fill the gap from that parent's own profile — e.g. the
+      // admin didn't have a phone number on hand, but the parent's account
+      // already has one. Anything the admin actually typed always wins.
+      const parentName = document.getElementById('student-parent-name').value.trim()
+        || (linkedParentProfile ? (linkedParentProfile.full_name || '') : '');
+      const parentPhone = document.getElementById('student-parent-phone').value.trim()
+        || (linkedParentProfile ? (linkedParentProfile.phone || '') : '');
+      const parentContactEmail = document.getElementById('student-parent-contact-email').value.trim()
+        || (linkedParentProfile ? (linkedParentProfile.email || '') : '');
       const passportFile = document.getElementById('student-passport-file').files[0];
 
       if (studentEditContext) {
         // Editing an existing student — class/enrollment untouched (use Transfer for that)
         const updatePayload = {
-          admission_number: document.getElementById('student-admission-number').value.trim(),
           full_name: document.getElementById('student-full-name').value.trim(),
           gender: document.getElementById('student-gender').value,
           date_of_birth: document.getElementById('student-dob').value || null,
-          parent_id: parentId,
+          parent_name: parentName || null,
+          parent_phone: parentPhone || null,
+          parent_email: parentContactEmail || null,
         };
+        if (parentIdOverride !== undefined) updatePayload.parent_id = parentIdOverride;
         if (passportFile) {
           const passportUrl = await uploadSchoolAsset(passportFile, 'passports');
           if (passportUrl) updatePayload.passport_url = passportUrl;
@@ -1775,18 +2204,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
         showToast('Student details updated.', 'success');
       } else {
-        // Adding a new student
+        // Adding a new student — admission_number is left out entirely so the
+        // database trigger generates it (PS<year><00001>); it's never typed
+        // in by hand.
         const passportUrl = await uploadSchoolAsset(passportFile, 'passports');
 
         const { data: student, error: studentErr } = await supabaseClient
           .from('students')
           .insert({
-            admission_number: document.getElementById('student-admission-number').value.trim(),
             full_name: document.getElementById('student-full-name').value.trim(),
             gender: document.getElementById('student-gender').value,
             date_of_birth: document.getElementById('student-dob').value || null,
             passport_url: passportUrl,
-            parent_id: parentId,
+            parent_name: parentName || null,
+            parent_phone: parentPhone || null,
+            parent_email: parentContactEmail || null,
+            parent_id: parentIdOverride || null,
           })
           .select()
           .single();
@@ -1806,7 +2239,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         if (enrollErr) throw enrollErr;
 
-        showToast('Student registered and enrolled.', 'success');
+        showToast(`Student registered — admission number ${student.admission_number}. Share this with the parent (see Export admission list).`, 'success');
       }
 
       resetStudentForm();
@@ -2007,6 +2440,7 @@ async function renderResultsEntryTable() {
 }
 
 function wireResultsRowActions() {
+  const allInputs = [];
   document.querySelectorAll('#results-entry-body tr').forEach(row => {
     const caInput = row.querySelector('[data-field="ca"]');
     const examInput = row.querySelector('[data-field="exam"]');
@@ -2016,8 +2450,21 @@ function wireResultsRowActions() {
       const exam = parseFloat(examInput.value) || 0;
       if (caInput.value !== '' || examInput.value !== '') totalCell.textContent = (ca + exam).toFixed(0) + ' (preview)';
     };
-    if (caInput && !caInput.disabled) caInput.addEventListener('input', recalc);
-    if (examInput && !examInput.disabled) examInput.addEventListener('input', recalc);
+    if (caInput && !caInput.disabled) { caInput.addEventListener('input', recalc); allInputs.push(caInput); }
+    if (examInput && !examInput.disabled) { examInput.addEventListener('input', recalc); allInputs.push(examInput); }
+  });
+
+  // Enter key jumps to the next editable score box instead of submitting
+  // anything, so a teacher can keyboard through the whole class quickly:
+  // CA → Exam → next student's CA → ...
+  allInputs.forEach((input, i) => {
+    input.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const next = allInputs[i + 1];
+      if (next) next.focus();
+      else document.getElementById('results-save-all-btn')?.focus();
+    });
   });
 
   document.querySelectorAll('[data-save-row]').forEach(btn => {
@@ -2066,6 +2513,85 @@ async function saveResultRow(enrollmentId) {
   }
 }
 
+// Lets a teacher fill in every student's scores first, then save the whole
+// class in one action instead of clicking "Save" per row. Rows left
+// completely blank are skipped (so a teacher can partially fill a class and
+// come back later); a row with only ONE of the two scores filled in is
+// treated as a mistake and blocks the whole save with a clear message,
+// since a half-entered score is more likely a typo than an intentional
+// partial save. Only rows still in "draft" (editable) are considered —
+// submitted/approved/rejected rows are untouched.
+async function saveAllResultsAsDraft() {
+  const rows = Array.from(document.querySelectorAll('#results-entry-body tr'));
+  const editableRows = rows.filter(row => {
+    const caInput = row.querySelector('[data-field="ca"]');
+    return caInput && !caInput.disabled;
+  });
+
+  if (editableRows.length === 0) {
+    showToast('Nothing here is currently editable.', 'error');
+    return;
+  }
+
+  const toSave = [];
+  const partial = [];
+  const outOfRange = [];
+
+  editableRows.forEach(row => {
+    const caVal = row.querySelector('[data-field="ca"]').value;
+    const examVal = row.querySelector('[data-field="exam"]').value;
+    const studentName = row.querySelector('td').textContent.trim();
+
+    if (caVal === '' && examVal === '') return; // untouched row — skip silently
+    if (caVal === '' || examVal === '') {
+      partial.push(studentName);
+      return;
+    }
+    const ca = Number(caVal), exam = Number(examVal);
+    if (ca < 0 || ca > 40 || exam < 0 || exam > 60) {
+      outOfRange.push(studentName);
+      return;
+    }
+    toSave.push({
+      enrollment_id: row.dataset.enrollmentId,
+      student_id: row.dataset.studentId,
+      subject_id: resultsScreenState.subjectId,
+      term_id: appState.activeTermId,
+      ca_score: ca,
+      exam_score: exam,
+      status: 'draft',
+      entered_by: appState.user.id,
+    });
+  });
+
+  if (partial.length > 0) {
+    showToast(`${partial.length} student(s) have only one score filled in — ${partial.join(', ')}. Fill both CA and Exam (or leave both blank) before saving.`, 'error');
+    return;
+  }
+  if (outOfRange.length > 0) {
+    showToast(`${outOfRange.length} student(s) have an out-of-range score — ${outOfRange.join(', ')}. CA must be 0–40 and Exam must be 0–60.`, 'error');
+    return;
+  }
+  if (toSave.length === 0) {
+    showToast('No scores entered yet.', 'error');
+    return;
+  }
+
+  showLoading();
+  try {
+    const { error } = await supabaseClient
+      .from('results')
+      .upsert(toSave, { onConflict: 'enrollment_id,subject_id' });
+    if (error) throw error;
+    showToast(`Saved ${toSave.length} student score(s) as draft.`, 'success');
+    renderResultsEntryTable();
+  } catch (err) {
+    showToast(err.message || 'Could not save.', 'error');
+  } finally {
+    hideLoading();
+  }
+}
+
 async function reopenResultRow(enrollmentId) {
   showLoading();
   try {
@@ -2094,6 +2620,8 @@ document.addEventListener('DOMContentLoaded', () => {
     resultsScreenState.subjectId = e.target.value;
     renderResultsEntryTable();
   });
+
+  document.getElementById('results-save-all-btn').addEventListener('click', saveAllResultsAsDraft);
 
   document.getElementById('results-submit-btn').addEventListener('click', async () => {
     const draftRows = Array.from(document.querySelectorAll('#results-entry-body tr')).filter(row => {
@@ -2127,6 +2655,7 @@ document.addEventListener('DOMContentLoaded', () => {
         .eq('status', 'draft');
       if (error) throw error;
       showToast('Submitted for approval.', 'success');
+      notifyAdminsResultsSubmitted(draftRows.length);
       renderResultsEntryTable();
     } catch (err) {
       showToast(err.message || 'Could not submit.', 'error');
@@ -2135,6 +2664,33 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 });
+
+// Emails every active admin when a teacher submits results for approval,
+// so admins don't have to keep checking the Result Approvals screen —
+// each email names the specific class + subject that's now waiting.
+// notification_emails() is a SECURITY DEFINER Supabase function (see
+// supabase-notifications.sql) since a teacher's own session can't
+// otherwise read other users' emails.
+async function notifyAdminsResultsSubmitted(count) {
+  try {
+    const arm = (await getTeacherArms()).find(a => a.id === resultsScreenState.armId);
+    const subjectOption = document.getElementById('results-subject-select').selectedOptions[0];
+    const subjectName = subjectOption ? subjectOption.textContent : 'a subject';
+    const className = arm ? arm.classes.name : 'a class';
+
+    const { data: admins } = await supabaseClient.rpc('notification_emails', { p_role: 'admin' });
+    const recipients = (admins || []).map(a => a.email).filter(Boolean);
+    if (recipients.length === 0) return;
+
+    sendAppsScriptBulkEmail({
+      recipients,
+      subject: `Results submitted for approval — ${className} · ${subjectName}`,
+      body: `${appState.user.full_name} has submitted ${count} result(s) for ${className} · ${subjectName} for your approval.\n\nGo to Result Approvals in your dashboard to review.\n\n— ${appState.schoolSettings?.school_name || 'The school'}`,
+    });
+  } catch (err) {
+    console.warn('Could not notify admins of submitted results:', err);
+  }
+}
 
 /* ----------------------------------------------------------------------------
    18. ADMIN — RESULT APPROVALS
@@ -2483,7 +3039,7 @@ async function renderReportCardsTable(rows) {
           .from('report_cards').update({ published_at: new Date().toISOString() }).eq('id', btn.dataset.publish);
         if (error) throw error;
         showToast('Published.', 'success');
-        notifyParentReportCardPublished(btn.dataset.publish);
+        notifyReportCardPublished(btn.dataset.publish);
         renderReportCardsTable(rows);
         checkSessionRolloverPrompt();
       } catch (err) {
@@ -2495,23 +3051,46 @@ async function renderReportCardsTable(rows) {
   });
 }
 
-// Emails the linked parent, if any, once a report card becomes visible to
-// them. Fire-and-forget — sendAppsScriptEmail() already no-ops safely if no
-// webhook is configured yet.
-async function notifyParentReportCardPublished(reportCardId) {
-  const { data: card } = await supabaseClient.from('report_cards').select('student_id, is_annual').eq('id', reportCardId).single();
+// Emails the linked parent AND the class teacher once a report card becomes
+// visible to them, with a direct link (?rc=<id> — see reportCardLinkURL())
+// that opens straight to it once they sign in. Fire-and-forget —
+// sendAppsScriptEmail() already no-ops safely if no webhook is configured.
+async function notifyReportCardPublished(reportCardId) {
+  const { data: card } = await supabaseClient
+    .from('report_cards').select('student_id, is_annual, enrollment_id').eq('id', reportCardId).single();
   if (!card) return;
   const { data: student } = await supabaseClient.from('students').select('full_name, parent_id').eq('id', card.student_id).single();
-  if (!student || !student.parent_id) return;
-  const { data: parent } = await supabaseClient.from('parents').select('users(full_name, email)').eq('id', student.parent_id).single();
-  if (!parent || !parent.users) return;
+  if (!student) return;
 
-  sendAppsScriptEmail({
-    type: 'notify',
-    to: parent.users.email,
-    subject: `${student.full_name}'s ${card.is_annual ? 'annual report' : 'report card'} is ready`,
-    body: `Hello ${parent.users.full_name},\n\n${student.full_name}'s ${card.is_annual ? 'annual report' : 'report card'} has been published and is now available to view in the Report Cards section of your account.\n\n— ${appState.schoolSettings?.school_name || 'The school'}`,
-  });
+  const label = card.is_annual ? 'annual report' : 'report card';
+  const link = reportCardLinkURL(reportCardId);
+
+  if (student.parent_id) {
+    const { data: parent } = await supabaseClient.from('parents').select('users(full_name, email)').eq('id', student.parent_id).single();
+    if (parent && parent.users) {
+      sendAppsScriptEmail({
+        to: parent.users.email,
+        subject: `${student.full_name}'s ${label} is ready`,
+        body: `Hello ${parent.users.full_name},\n\n${student.full_name}'s ${label} has been published. View it here:\n${link}\n\n(If that link asks you to sign in first, it'll take you straight there afterward.)\n\n— ${appState.schoolSettings?.school_name || 'The school'}`,
+      });
+    }
+  }
+
+  if (card.enrollment_id) {
+    const { data: enrollment } = await supabaseClient
+      .from('enrollments').select('class_arms(class_teacher_id)').eq('id', card.enrollment_id).single();
+    const teacherId = enrollment?.class_arms?.class_teacher_id;
+    if (teacherId) {
+      const { data: teacherStaff } = await supabaseClient.from('staff').select('users(full_name, email)').eq('id', teacherId).single();
+      if (teacherStaff && teacherStaff.users) {
+        sendAppsScriptEmail({
+          to: teacherStaff.users.email,
+          subject: `${student.full_name}'s ${label} has been published`,
+          body: `Hello ${teacherStaff.users.full_name},\n\n${student.full_name}'s ${label} has just been published to their parent. View it here:\n${link}\n\n— ${appState.schoolSettings?.school_name || 'The school'}`,
+        });
+      }
+    }
+  }
 }
 
 async function renderTeacherReportCardsScreen(container) {
@@ -2563,6 +3142,7 @@ async function renderTeacherReportCardsScreen(container) {
         const { error } = await supabaseClient.rpc('confirm_report_card', { card_id: btn.dataset.confirmCard });
         if (error) throw error;
         showToast('Confirmed. The administrator can now publish it.', 'success');
+        notifyAdminsReportCardConfirmed(btn.dataset.confirmCard);
         loadReportCardsScreen();
       } catch (err) {
         showToast(err.message || 'Could not confirm.', 'error');
@@ -2573,10 +3153,89 @@ async function renderTeacherReportCardsScreen(container) {
   });
 }
 
+// Emails every active admin once a teacher confirms a report card is
+// accurate — the admin's cue that it's now safe to publish. Uses the same
+// notification_emails() RPC as notifyAdminsResultsSubmitted() above.
+async function notifyAdminsReportCardConfirmed(cardId) {
+  try {
+    const { data: card } = await supabaseClient.from('report_cards').select('student_id').eq('id', cardId).single();
+    const { data: student } = card
+      ? await supabaseClient.from('students').select('full_name').eq('id', card.student_id).single()
+      : { data: null };
+
+    const { data: admins } = await supabaseClient.rpc('notification_emails', { p_role: 'admin' });
+    const recipients = (admins || []).map(a => a.email).filter(Boolean);
+    if (recipients.length === 0) return;
+
+    const studentName = student ? student.full_name : 'A student';
+    sendAppsScriptBulkEmail({
+      recipients,
+      subject: `Ready to publish — ${studentName}'s report card`,
+      body: `${appState.user.full_name} has confirmed ${studentName}'s report card is accurate and ready to publish.\n\nGo to Report Cards in your dashboard to publish it.\n\n— ${appState.schoolSettings?.school_name || 'The school'}`,
+    });
+  } catch (err) {
+    console.warn('Could not notify admins of report card confirmation:', err);
+  }
+}
+
+function linkChildCardHTML() {
+  return `
+    <div class="card" id="link-child-card">
+      <h2 class="card-title">Link another child</h2>
+      <p class="view-subheading">Enter their admission number and the phone number on file with the school.</p>
+      <div class="form-grid">
+        <div><label class="field-label" for="link-child-admission">Admission number</label><input class="field-input" id="link-child-admission"></div>
+        <div><label class="field-label" for="link-child-phone">Phone number on file</label><input class="field-input" id="link-child-phone" value="${escapeHtml(appState.user.phone || '')}"></div>
+      </div>
+      <p class="field-error hidden" id="link-child-error" role="alert"></p>
+      <div class="form-actions"><button type="button" class="btn btn-primary" id="link-child-submit-btn">Link child</button></div>
+    </div>`;
+}
+
+function wireLinkChildForm() {
+  const btn = document.getElementById('link-child-submit-btn');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    const errorEl = document.getElementById('link-child-error');
+    errorEl.classList.add('hidden');
+    const admissionNumber = document.getElementById('link-child-admission').value.trim();
+    const phone = document.getElementById('link-child-phone').value.trim();
+    if (!admissionNumber || !phone) {
+      errorEl.textContent = 'Enter both the admission number and phone number.';
+      errorEl.classList.remove('hidden');
+      return;
+    }
+    showLoading();
+    try {
+      const { data: result, error } = await supabaseClient
+        .rpc('link_parent_to_student', {
+          p_admission_number: admissionNumber,
+          p_phone: phone,
+          p_parent_name: appState.user.full_name,
+          p_parent_email: appState.user.email,
+        });
+      if (error) throw error;
+      if (!result.success) {
+        errorEl.textContent = result.error;
+        errorEl.classList.remove('hidden');
+        return;
+      }
+      showToast(`Linked ${result.full_name} to your account.`, 'success');
+      loadReportCardsScreen();
+    } catch (err) {
+      errorEl.textContent = err.message || 'Could not link that child.';
+      errorEl.classList.remove('hidden');
+    } finally {
+      hideLoading();
+    }
+  });
+}
+
 async function renderParentReportCardsScreen(container) {
   const { data: children } = await supabaseClient.from('students').select('id, full_name').eq('parent_id', appState.user.id);
   if (!children || children.length === 0) {
-    container.innerHTML = `<div class="card card-notice"><p>No children linked to your account yet. Contact the administrator.</p></div>`;
+    container.innerHTML = linkChildCardHTML() + `<div class="card card-notice"><p>No children linked to your account yet. Link one above, or contact the administrator.</p></div>`;
+    wireLinkChildForm();
     return;
   }
   const { data: cards } = await supabaseClient
@@ -2586,11 +3245,12 @@ async function renderParentReportCardsScreen(container) {
     .not('published_at', 'is', null);
 
   if (!cards || cards.length === 0) {
-    container.innerHTML = `<div class="card card-notice"><p>No published report cards yet. They'll appear here as soon as the school publishes them.</p></div>`;
+    container.innerHTML = linkChildCardHTML() + `<div class="card card-notice"><p>No published report cards yet. They'll appear here as soon as the school publishes them.</p></div>`;
+    wireLinkChildForm();
     return;
   }
 
-  container.innerHTML = cards.map(c => {
+  container.innerHTML = linkChildCardHTML() + cards.map(c => {
     const child = children.find(ch => ch.id === c.student_id);
     return `
       <div class="card">
@@ -2608,6 +3268,7 @@ async function renderParentReportCardsScreen(container) {
   container.querySelectorAll('[data-preview]').forEach(btn => {
     btn.addEventListener('click', () => openReportCardPreview(btn.dataset.preview));
   });
+  wireLinkChildForm();
 }
 
 /* ----------------------------------------------------------------------------
@@ -2954,7 +3615,7 @@ document.addEventListener('DOMContentLoaded', () => {
         .from('report_cards').update({ published_at: new Date().toISOString() }).eq('id', currentPreviewCardId);
       if (error) throw error;
       showToast('Published.', 'success');
-      notifyParentReportCardPublished(currentPreviewCardId);
+      notifyReportCardPublished(currentPreviewCardId);
       closeReportCardPreview();
       loadReportCardsScreen();
       checkSessionRolloverPrompt();
@@ -3624,13 +4285,48 @@ async function renderAdminAnnouncementsScreen(container) {
 async function setAnnouncementPublished(id, published) {
   showLoading();
   try {
-    const { error } = await supabaseClient.from('announcements').update({ is_published: published }).eq('id', id);
+    const { data, error } = await supabaseClient
+      .from('announcements').update({ is_published: published }).eq('id', id).select().single();
     if (error) throw error;
+    if (published && data) notifyAnnouncementAudience(data);
     loadAnnouncementsScreen();
   } catch (err) {
     showToast(err.message || 'Could not update.', 'error');
   } finally {
     hideLoading();
+  }
+}
+
+// Emails the announcement's chosen audience the moment it's published.
+// audience is 'all' | 'teachers' | 'parents' (set when the announcement was
+// created). Admin already has full read access to staff/parents (same
+// tables the Staff & Teachers / Parents screens use), so no extra RPC is
+// needed here — unlike the teacher-triggered notifications above.
+async function notifyAnnouncementAudience(announcement) {
+  try {
+    const recipients = [];
+
+    if (announcement.audience === 'all' || announcement.audience === 'teachers') {
+      const { data: staffRows } = await supabaseClient.from('staff').select('users(email, role)');
+      (staffRows || []).forEach(s => {
+        if (s.users && s.users.email && s.users.role === 'teacher') recipients.push(s.users.email);
+      });
+    }
+    if (announcement.audience === 'all' || announcement.audience === 'parents') {
+      const { data: parentRows } = await supabaseClient.from('parents').select('users(email)');
+      (parentRows || []).forEach(p => {
+        if (p.users && p.users.email) recipients.push(p.users.email);
+      });
+    }
+
+    if (recipients.length === 0) return;
+    sendAppsScriptBulkEmail({
+      recipients,
+      subject: `New announcement: ${announcement.title}`,
+      body: `${announcement.body}\n\n— ${appState.schoolSettings?.school_name || 'The school'}`,
+    });
+  } catch (err) {
+    console.warn('Could not notify announcement audience:', err);
   }
 }
 
@@ -3754,9 +4450,7 @@ async function loadSettingsScreen() {
 
     <div class="card">
       <h2 class="card-title">Email notifications</h2>
-      <p class="view-subheading">Powered by a small Google Apps Script Web App you deploy once (see apps-script/Code.gs). Once set, the system emails staff/parents an activation invite when added, and emails parents when a report card is published.</p>
-      <label class="field-label" for="set-webhook-url">Apps Script webhook URL</label>
-      <input class="field-input" id="set-webhook-url" placeholder="https://script.google.com/macros/s/.../exec" value="${escapeHtml(s.apps_script_webhook_url || '')}">
+      <p class="view-subheading">Sent automatically by a Google Apps Script Web App (see Code.gs) — it's the only thing that sends email for this system, including password resets. It emails: staff/parents an activation invite when added; parents a welcome note when they self-register; admins when results are submitted for approval and when a teacher confirms a report card is ready; teachers and parents when a report card is published (with a direct link); the chosen audience when an announcement is published; and 6-digit codes for "Forgot password?". Nothing to configure here — it's wired in already.</p>
       <div class="form-actions">
         <button type="button" class="btn btn-ghost-dark" id="test-webhook-btn">Send test email to school address</button>
       </div>
@@ -3849,7 +4543,6 @@ async function loadSettingsScreen() {
         address: document.getElementById('set-address').value.trim(),
         principal_name: document.getElementById('set-principal-name').value.trim(),
         theme_color: document.getElementById('set-theme-color').value,
-        apps_script_webhook_url: document.getElementById('set-webhook-url').value.trim() || null,
         updated_at: new Date().toISOString(),
       };
       const logoFile = document.getElementById('set-logo-file').files[0];
@@ -3879,9 +4572,8 @@ async function loadSettingsScreen() {
   });
 
   document.getElementById('test-webhook-btn').addEventListener('click', async () => {
-    const url = document.getElementById('set-webhook-url').value.trim();
+    const url = APPS_SCRIPT_WEBHOOK_URL;
     const schoolEmail = document.getElementById('set-email').value.trim();
-    if (!url) { showToast('Enter and save a webhook URL first.', 'error'); return; }
     if (!schoolEmail) { showToast('Enter and save a school email first.', 'error'); return; }
     showLoading();
     try {
@@ -3893,7 +4585,7 @@ async function loadSettingsScreen() {
       if (data && data.error) throw new Error(data.error);
       showToast(`Test email sent to ${schoolEmail}. Check the inbox.`, 'success');
     } catch (err) {
-      showToast(err.message || 'Could not reach the Apps Script webhook. Double-check the URL and that it\'s deployed with "Anyone" access.', 'error');
+      showToast(err.message || 'Could not reach the Apps Script webhook. Double-check it\'s deployed with "Anyone" access.', 'error');
     } finally {
       hideLoading();
     }
@@ -4202,16 +4894,39 @@ async function exportTableAsJSON(table) {
    ---------------------------------------------------------------------------- */
 async function bootstrap() {
   document.getElementById('login-form').addEventListener('submit', handleLoginSubmit);
-  document.getElementById('forgot-password-btn').addEventListener('click', handleForgotPassword);
+  document.getElementById('forgot-password-btn').addEventListener('click', () => showResetForm(true));
+  document.getElementById('back-to-login-from-reset-btn').addEventListener('click', () => showResetForm(false));
+  document.getElementById('reset-request-form').addEventListener('submit', handleResetRequestSubmit);
+  document.getElementById('reset-confirm-form').addEventListener('submit', handleResetConfirmSubmit);
+  document.getElementById('reset-resend-btn').addEventListener('click', () => {
+    document.getElementById('reset-request-form').classList.remove('hidden');
+    document.getElementById('reset-confirm-form').classList.add('hidden');
+    document.getElementById('reset-resend-btn').classList.add('hidden');
+  });
   document.getElementById('show-activate-btn').addEventListener('click', () => showActivateForm(true));
   document.getElementById('back-to-login-btn').addEventListener('click', () => showActivateForm(false));
   document.getElementById('activate-form').addEventListener('submit', handleActivateSubmit);
+  document.getElementById('show-register-btn').addEventListener('click', () => showRegisterForm(true));
+  document.getElementById('back-to-login-from-register-btn').addEventListener('click', () => showRegisterForm(false));
+  document.getElementById('register-form').addEventListener('submit', handleRegisterSubmit);
+  document.getElementById('register-child-count').addEventListener('change', renderRegisterChildRows);
+  document.getElementById('register-add-child-btn').addEventListener('click', () => {
+    addRegisterChildRow();
+    document.getElementById('register-child-count').value =
+      document.getElementById('register-children-rows').querySelectorAll('.wizard-repeat-row').length;
+  });
   document.getElementById('show-contact-btn').addEventListener('click', () => showContactForm(true));
   document.getElementById('back-to-login-from-contact-btn').addEventListener('click', () => showContactForm(false));
   document.getElementById('contact-form').addEventListener('submit', handleContactSubmit);
   document.getElementById('logout-btn').addEventListener('click', handleLogout);
   document.getElementById('sidebar-toggle-btn').addEventListener('click', toggleSidebar);
   document.getElementById('sidebar-backdrop').addEventListener('click', closeMobileSidebar);
+
+  // A report-card-published email links straight to ?rc=<id>. Stash it
+  // (works whether or not the person is signed in yet) and consume it once
+  // the app shell is actually up, in enterAppShell() below.
+  const rcParam = new URLSearchParams(window.location.search).get('rc');
+  if (rcParam) sessionStorage.setItem('pendingReportCardId', rcParam);
 
   showLoading();
   const { data: { session } } = await supabaseClient.auth.getSession();
