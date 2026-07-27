@@ -369,6 +369,31 @@ input { font-family: inherit; }
   font-size: 14px;
 }
 
+.export-menu {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-card);
+  padding: 6px;
+  margin: -10px 0 12px auto;
+  width: fit-content;
+}
+.export-menu button {
+  background: none;
+  border: none;
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 13.5px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--color-ink);
+}
+.export-menu button:hover { background: var(--color-paper); }
+
 .data-table {
   width: 100%;
   border-collapse: collapse;
