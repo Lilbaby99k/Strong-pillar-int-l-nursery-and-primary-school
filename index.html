@@ -42,8 +42,8 @@
       <p class="login-form-subtitle">Administrators, teachers, and parents all sign in here.</p>
 
       <form id="login-form" novalidate>
-        <label class="field-label" for="login-email">Email</label>
-        <input class="field-input" type="email" id="login-email" name="email" autocomplete="username" required>
+        <label class="field-label" for="login-email">Email (or phone, if you registered with one instead)</label>
+        <input class="field-input" type="text" id="login-email" name="email" autocomplete="username" required>
 
         <label class="field-label" for="login-password">Password</label>
         <input class="field-input" type="password" id="login-password" name="password" autocomplete="current-password" required>
@@ -55,7 +55,82 @@
 
       <button type="button" class="link-btn" id="forgot-password-btn">Forgot password?</button>
       <button type="button" class="link-btn" id="show-activate-btn">Staff or parent? Activate your account</button>
+      <button type="button" class="link-btn" id="show-register-btn">New parent? Create an account</button>
       <button type="button" class="link-btn" id="show-contact-btn">Need help? Contact the school</button>
+    </div>
+
+    <div class="login-form-card hidden" id="reset-form-card">
+      <h2 class="login-form-title">Reset your password</h2>
+      <p class="login-form-subtitle" id="reset-form-subtitle">Enter your email (or phone, if that's how you sign in) and we'll email you a 6-digit code.</p>
+
+      <form id="reset-request-form" novalidate>
+        <label class="field-label" for="reset-email">Email (or phone)</label>
+        <input class="field-input" id="reset-email" autocomplete="username" required>
+
+        <p id="reset-request-error" class="field-error hidden" role="alert"></p>
+
+        <button type="submit" class="btn btn-primary btn-block" id="reset-request-btn">Send reset code</button>
+      </form>
+
+      <form id="reset-confirm-form" class="hidden" novalidate style="margin-top:18px;">
+        <label class="field-label" for="reset-otp">6-digit code</label>
+        <input class="field-input" id="reset-otp" inputmode="numeric" maxlength="6" placeholder="123456" required>
+
+        <label class="field-label" for="reset-new-password">New password</label>
+        <input class="field-input" type="password" id="reset-new-password" autocomplete="new-password" minlength="8" required>
+
+        <label class="field-label" for="reset-new-password-confirm">Confirm new password</label>
+        <input class="field-input" type="password" id="reset-new-password-confirm" autocomplete="new-password" minlength="8" required>
+
+        <p id="reset-confirm-error" class="field-error hidden" role="alert"></p>
+        <p id="reset-confirm-notice" class="field-error hidden" style="color:#2F5233;background:#E9F0E7;" role="status"></p>
+
+        <button type="submit" class="btn btn-primary btn-block" id="reset-confirm-btn">Reset password</button>
+      </form>
+      <button type="button" class="link-btn hidden" id="reset-resend-btn">Send a new code</button>
+
+      <button type="button" class="link-btn" id="back-to-login-from-reset-btn">Back to sign in</button>
+    </div>
+
+    <div class="login-form-card hidden" id="register-form-card">
+      <h2 class="login-form-title">Create a parent account</h2>
+      <p class="login-form-subtitle">You'll need each child's admission number and the phone number the school has on file for them — ask the office if you don't have these.</p>
+
+      <form id="register-form" novalidate>
+        <label class="field-label" for="register-full-name">Full name</label>
+        <input class="field-input" id="register-full-name" required>
+
+        <label class="field-label" for="register-phone">Phone number</label>
+        <input class="field-input" id="register-phone" required>
+
+        <label class="field-label" for="register-email">Email</label>
+        <input class="field-input" type="email" id="register-email" autocomplete="email" required>
+
+        <label class="field-label" for="register-password">Password</label>
+        <input class="field-input" type="password" id="register-password" autocomplete="new-password" minlength="8" required>
+
+        <label class="field-label" for="register-password-confirm">Confirm password</label>
+        <input class="field-input" type="password" id="register-password-confirm" autocomplete="new-password" minlength="8" required>
+
+        <label class="field-label" for="register-child-count">How many children do you currently have in this school?</label>
+        <select class="field-input" id="register-child-count">
+          <option value="1">One</option>
+          <option value="2">Two</option>
+          <option value="3">Three</option>
+          <option value="4">Four</option>
+          <option value="5">Five or more</option>
+        </select>
+
+        <div id="register-children-rows" class="wizard-repeat-rows" style="margin-top:10px;"></div>
+        <button type="button" class="link-btn" id="register-add-child-btn" style="margin:0 0 10px;">+ Add another child</button>
+
+        <p id="register-error" class="field-error hidden" role="alert"></p>
+        <p id="register-notice" class="field-error hidden" style="color:#2F5233;background:#E9F0E7;" role="status"></p>
+
+        <button type="submit" class="btn btn-primary btn-block" id="register-submit-btn">Create account</button>
+      </form>
+
+      <button type="button" class="link-btn" id="back-to-login-from-register-btn">Back to sign in</button>
     </div>
 
     <div class="login-form-card hidden" id="activate-form-card">
@@ -481,7 +556,7 @@ Social Studies"></textarea>
           <h3 id="student-form-heading">Add student</h3>
           <form id="student-form">
             <div class="form-grid">
-              <div><label class="field-label" for="student-admission-number">Admission number</label><input class="field-input" id="student-admission-number" required></div>
+              <div id="student-admission-group"><label class="field-label" for="student-admission-number">Admission number</label><input class="field-input" id="student-admission-number" readonly placeholder="Generated automatically on save"></div>
               <div><label class="field-label" for="student-full-name">Full name</label><input class="field-input" id="student-full-name" required></div>
               <div><label class="field-label" for="student-gender">Gender</label>
                 <select class="field-input" id="student-gender">
@@ -491,9 +566,13 @@ Social Studies"></textarea>
               </div>
               <div><label class="field-label" for="student-dob">Date of birth</label><input class="field-input" type="date" id="student-dob"></div>
               <div id="student-class-group"><label class="field-label" for="student-class">Class</label><select class="field-input" id="student-class"></select></div>
-              <div><label class="field-label" for="student-parent-email">Parent (existing, by email)</label><input class="field-input" id="student-parent-email" placeholder="parent@email.com — leave blank to link later"></div>
+              <div><label class="field-label" for="student-parent-name">Parent/guardian name</label><input class="field-input" id="student-parent-name"></div>
+              <div><label class="field-label" for="student-parent-phone">Parent/guardian phone</label><input class="field-input" id="student-parent-phone" placeholder="Used to verify parent self-registration"></div>
+              <div><label class="field-label" for="student-parent-contact-email">Parent/guardian email (optional)</label><input class="field-input" type="email" id="student-parent-contact-email"></div>
+              <div><label class="field-label" for="student-existing-parent-email">Link an already-registered parent (optional)</label><input class="field-input" type="email" id="student-existing-parent-email" placeholder="parent@email.com — only if they already have an account"></div>
               <div><label class="field-label" for="student-passport-file">Passport photo</label><input class="field-input" type="file" id="student-passport-file" accept="image/*"></div>
             </div>
+            <p class="view-subheading" id="student-form-note" style="margin-top:10px;">The admission number is generated automatically and can't be edited. If the parent later creates their own account, they'll link to this student using this admission number plus the phone number entered here.</p>
             <p class="view-subheading hidden" id="student-form-edit-note" style="margin-top:10px;">To move this student to a different class, use "Transfer" from the table instead.</p>
             <p class="field-error hidden" id="student-form-error" role="alert"></p>
             <div class="form-actions">
@@ -505,7 +584,13 @@ Social Studies"></textarea>
 
         <div class="table-toolbar">
           <input class="table-search" id="student-search" placeholder="Search students by name or admission no…">
+          <button type="button" class="btn btn-ghost-dark" id="student-export-btn">Export admission list ▾</button>
           <button type="button" class="btn btn-primary" id="student-add-btn">+ Add student</button>
+        </div>
+        <div id="student-export-menu" class="export-menu hidden">
+          <button type="button" data-export-format="csv">Download CSV</button>
+          <button type="button" data-export-format="xlsx">Download Excel (.xlsx)</button>
+          <button type="button" data-export-format="print">Print / Save as PDF</button>
         </div>
 
         <table class="data-table">
@@ -556,6 +641,7 @@ Social Studies"></textarea>
         </table>
 
         <div class="form-actions" id="results-submit-row" style="display:none;">
+          <button type="button" class="btn btn-ghost-dark" id="results-save-all-btn">Save all as draft</button>
           <button type="button" class="btn btn-primary" id="results-submit-btn">Submit all drafts for approval</button>
         </div>
       </section>
@@ -720,6 +806,7 @@ Social Studies"></textarea>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="script.js"></script>
 </body>
 </html>
