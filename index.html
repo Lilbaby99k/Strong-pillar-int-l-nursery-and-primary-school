@@ -39,14 +39,16 @@
   <section class="login-form-pane">
     <div class="login-form-card">
       <h2 class="login-form-title">Sign in</h2>
-      <p class="login-form-subtitle">Administrators, teachers, and parents all sign in here.</p>
 
       <form id="login-form" novalidate>
-        <label class="field-label" for="login-email">Email (or phone, if you registered with one instead)</label>
+        <label class="field-label" for="login-email">Email</label>
         <input class="field-input" type="text" id="login-email" name="email" autocomplete="username" required>
 
         <label class="field-label" for="login-password">Password</label>
-        <input class="field-input" type="password" id="login-password" name="password" autocomplete="current-password" required>
+        <div class="password-field">
+          <input class="field-input" type="password" id="login-password" name="password" autocomplete="current-password" required>
+          <button type="button" class="password-toggle-btn" data-password-toggle="login-password" aria-label="Show password"><svg class="icon-eye-open" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M1.5 12S5 5 12 5s10.5 7 10.5 7-3.5 7-10.5 7S1.5 12 1.5 12Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.6"/></svg><svg class="icon-eye-closed hidden" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M3 3l18 18" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M10.6 5.2A10.9 10.9 0 0 1 12 5c7 0 10.5 7 10.5 7a13.7 13.7 0 0 1-3.1 4.1M6.6 6.6C3.5 8.6 1.5 12 1.5 12S5 19 12 19c1.3 0 2.5-.2 3.6-.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.9 10.1A3 3 0 0 0 12 15a3 3 0 0 0 2.1-.9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
 
         <p id="login-error" class="field-error hidden" role="alert"></p>
 
@@ -54,7 +56,7 @@
       </form>
 
       <button type="button" class="link-btn" id="forgot-password-btn">Forgot password?</button>
-      <button type="button" class="link-btn" id="show-activate-btn">Staff or parent? Activate your account</button>
+      <button type="button" class="link-btn" id="show-activate-btn">Staff? Activate your account</button>
       <button type="button" class="link-btn" id="show-register-btn">New parent? Create an account</button>
       <button type="button" class="link-btn" id="show-contact-btn">Need help? Contact the school</button>
     </div>
@@ -77,10 +79,16 @@
         <input class="field-input" id="reset-otp" inputmode="numeric" maxlength="6" placeholder="123456" required>
 
         <label class="field-label" for="reset-new-password">New password</label>
-        <input class="field-input" type="password" id="reset-new-password" autocomplete="new-password" minlength="8" required>
+        <div class="password-field">
+          <input class="field-input" type="password" id="reset-new-password" autocomplete="new-password" minlength="8" required>
+          <button type="button" class="password-toggle-btn" data-password-toggle="reset-new-password" aria-label="Show password"><svg class="icon-eye-open" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M1.5 12S5 5 12 5s10.5 7 10.5 7-3.5 7-10.5 7S1.5 12 1.5 12Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.6"/></svg><svg class="icon-eye-closed hidden" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M3 3l18 18" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M10.6 5.2A10.9 10.9 0 0 1 12 5c7 0 10.5 7 10.5 7a13.7 13.7 0 0 1-3.1 4.1M6.6 6.6C3.5 8.6 1.5 12 1.5 12S5 19 12 19c1.3 0 2.5-.2 3.6-.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.9 10.1A3 3 0 0 0 12 15a3 3 0 0 0 2.1-.9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
 
         <label class="field-label" for="reset-new-password-confirm">Confirm new password</label>
-        <input class="field-input" type="password" id="reset-new-password-confirm" autocomplete="new-password" minlength="8" required>
+        <div class="password-field">
+          <input class="field-input" type="password" id="reset-new-password-confirm" autocomplete="new-password" minlength="8" required>
+          <button type="button" class="password-toggle-btn" data-password-toggle="reset-new-password-confirm" aria-label="Show password"><svg class="icon-eye-open" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M1.5 12S5 5 12 5s10.5 7 10.5 7-3.5 7-10.5 7S1.5 12 1.5 12Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.6"/></svg><svg class="icon-eye-closed hidden" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M3 3l18 18" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M10.6 5.2A10.9 10.9 0 0 1 12 5c7 0 10.5 7 10.5 7a13.7 13.7 0 0 1-3.1 4.1M6.6 6.6C3.5 8.6 1.5 12 1.5 12S5 19 12 19c1.3 0 2.5-.2 3.6-.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.9 10.1A3 3 0 0 0 12 15a3 3 0 0 0 2.1-.9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
 
         <p id="reset-confirm-error" class="field-error hidden" role="alert"></p>
         <p id="reset-confirm-notice" class="field-error hidden" style="color:#2F5233;background:#E9F0E7;" role="status"></p>
@@ -107,10 +115,16 @@
         <input class="field-input" type="email" id="register-email" autocomplete="email" required>
 
         <label class="field-label" for="register-password">Password</label>
-        <input class="field-input" type="password" id="register-password" autocomplete="new-password" minlength="8" required>
+        <div class="password-field">
+          <input class="field-input" type="password" id="register-password" autocomplete="new-password" minlength="8" required>
+          <button type="button" class="password-toggle-btn" data-password-toggle="register-password" aria-label="Show password"><svg class="icon-eye-open" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M1.5 12S5 5 12 5s10.5 7 10.5 7-3.5 7-10.5 7S1.5 12 1.5 12Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.6"/></svg><svg class="icon-eye-closed hidden" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M3 3l18 18" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M10.6 5.2A10.9 10.9 0 0 1 12 5c7 0 10.5 7 10.5 7a13.7 13.7 0 0 1-3.1 4.1M6.6 6.6C3.5 8.6 1.5 12 1.5 12S5 19 12 19c1.3 0 2.5-.2 3.6-.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.9 10.1A3 3 0 0 0 12 15a3 3 0 0 0 2.1-.9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
 
         <label class="field-label" for="register-password-confirm">Confirm password</label>
-        <input class="field-input" type="password" id="register-password-confirm" autocomplete="new-password" minlength="8" required>
+        <div class="password-field">
+          <input class="field-input" type="password" id="register-password-confirm" autocomplete="new-password" minlength="8" required>
+          <button type="button" class="password-toggle-btn" data-password-toggle="register-password-confirm" aria-label="Show password"><svg class="icon-eye-open" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M1.5 12S5 5 12 5s10.5 7 10.5 7-3.5 7-10.5 7S1.5 12 1.5 12Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.6"/></svg><svg class="icon-eye-closed hidden" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M3 3l18 18" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M10.6 5.2A10.9 10.9 0 0 1 12 5c7 0 10.5 7 10.5 7a13.7 13.7 0 0 1-3.1 4.1M6.6 6.6C3.5 8.6 1.5 12 1.5 12S5 19 12 19c1.3 0 2.5-.2 3.6-.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.9 10.1A3 3 0 0 0 12 15a3 3 0 0 0 2.1-.9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
 
         <label class="field-label" for="register-child-count">How many children do you currently have in this school?</label>
         <select class="field-input" id="register-child-count">
@@ -142,10 +156,16 @@
         <input class="field-input" type="email" id="activate-email" autocomplete="username" required>
 
         <label class="field-label" for="activate-password">Choose a password</label>
-        <input class="field-input" type="password" id="activate-password" autocomplete="new-password" minlength="8" required>
+        <div class="password-field">
+          <input class="field-input" type="password" id="activate-password" autocomplete="new-password" minlength="8" required>
+          <button type="button" class="password-toggle-btn" data-password-toggle="activate-password" aria-label="Show password"><svg class="icon-eye-open" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M1.5 12S5 5 12 5s10.5 7 10.5 7-3.5 7-10.5 7S1.5 12 1.5 12Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.6"/></svg><svg class="icon-eye-closed hidden" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M3 3l18 18" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M10.6 5.2A10.9 10.9 0 0 1 12 5c7 0 10.5 7 10.5 7a13.7 13.7 0 0 1-3.1 4.1M6.6 6.6C3.5 8.6 1.5 12 1.5 12S5 19 12 19c1.3 0 2.5-.2 3.6-.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.9 10.1A3 3 0 0 0 12 15a3 3 0 0 0 2.1-.9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
 
         <label class="field-label" for="activate-password-confirm">Confirm password</label>
-        <input class="field-input" type="password" id="activate-password-confirm" autocomplete="new-password" minlength="8" required>
+        <div class="password-field">
+          <input class="field-input" type="password" id="activate-password-confirm" autocomplete="new-password" minlength="8" required>
+          <button type="button" class="password-toggle-btn" data-password-toggle="activate-password-confirm" aria-label="Show password"><svg class="icon-eye-open" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M1.5 12S5 5 12 5s10.5 7 10.5 7-3.5 7-10.5 7S1.5 12 1.5 12Z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.6"/></svg><svg class="icon-eye-closed hidden" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M3 3l18 18" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M10.6 5.2A10.9 10.9 0 0 1 12 5c7 0 10.5 7 10.5 7a13.7 13.7 0 0 1-3.1 4.1M6.6 6.6C3.5 8.6 1.5 12 1.5 12S5 19 12 19c1.3 0 2.5-.2 3.6-.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.9 10.1A3 3 0 0 0 12 15a3 3 0 0 0 2.1-.9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
 
         <p id="activate-error" class="field-error hidden" role="alert"></p>
         <p id="activate-notice" class="field-error hidden" style="color:#2F5233;background:#E9F0E7;" role="status"></p>
@@ -519,27 +539,50 @@ Social Studies"></textarea>
       <section id="view-classes" class="content-view hidden">
         <div class="view-header">
           <h1>Classes &amp; Subjects</h1>
-          <p class="view-subheading">Manage classes, class-teacher assignment, and subject lists.</p>
+          <p class="view-subheading">Manage classes, assign class teachers, and maintain your subject list.</p>
         </div>
 
-        <div class="card">
-          <h2 class="card-title">Add a class</h2>
-          <div class="form-grid">
-            <div><label class="field-label" for="new-class-name">Class name</label><input class="field-input" id="new-class-name" placeholder="e.g. Primary 4"></div>
-          </div>
-          <div class="form-actions"><button type="button" class="btn btn-primary" id="add-class-btn">Add class</button></div>
-        </div>
+        <div class="classes-subjects-grid">
 
-        <div id="classes-list"></div>
+          <!-- CLASSES PANEL -->
+          <div class="card panel-card">
+            <div class="panel-card-header">
+              <div>
+                <h2 class="card-title">Classes</h2>
+                <p class="panel-card-sub" id="classes-count-note">—</p>
+              </div>
+            </div>
 
-        <div class="card">
-          <h2 class="card-title">Subjects</h2>
-          <div class="form-grid">
-            <div><label class="field-label" for="new-subject-name">New subject name</label><input class="field-input" id="new-subject-name" placeholder="e.g. Verbal Reasoning"></div>
-            <div><label class="field-label" for="new-subject-code">Code (optional)</label><input class="field-input" id="new-subject-code"></div>
+            <div class="inline-add-row">
+              <input class="field-input" id="new-class-name" placeholder="Class name, e.g. Primary 4">
+              <button type="button" class="btn btn-primary" id="add-class-btn">+ Add class</button>
+            </div>
+
+            <div class="classes-list-head">
+              <span>Class</span><span>Class teacher</span><span></span>
+            </div>
+            <div id="classes-list" class="classes-list"></div>
           </div>
-          <div class="form-actions"><button type="button" class="btn btn-primary" id="add-subject-btn">Add subject</button></div>
-          <div id="subjects-chip-list" style="margin-top:14px;"></div>
+
+          <!-- SUBJECTS PANEL -->
+          <div class="card panel-card">
+            <div class="panel-card-header">
+              <div>
+                <h2 class="card-title">Subjects</h2>
+                <p class="panel-card-sub" id="subjects-count-note">—</p>
+              </div>
+            </div>
+
+            <div class="inline-add-row inline-add-row-wide">
+              <input class="field-input" id="new-subject-name" placeholder="Subject name, e.g. Verbal Reasoning">
+              <input class="field-input subject-code-input" id="new-subject-code" placeholder="Code">
+              <button type="button" class="btn btn-primary" id="add-subject-btn">+ Add</button>
+            </div>
+            <p class="panel-hint">New subjects are automatically assigned to every class.</p>
+
+            <div id="subjects-chip-list" class="subjects-chip-list"></div>
+          </div>
+
         </div>
       </section>
 
@@ -582,6 +625,11 @@ Social Studies"></textarea>
           </form>
         </div>
 
+        <div class="view-tabs" id="student-status-tabs">
+          <button type="button" class="view-tab active" data-student-tab="active">Active</button>
+          <button type="button" class="view-tab" data-student-tab="withdrawn">Withdrawn</button>
+        </div>
+
         <div class="table-toolbar">
           <input class="table-search" id="student-search" placeholder="Search students by name or admission no…">
           <button type="button" class="btn btn-ghost-dark" id="student-export-btn">Export admission list ▾</button>
@@ -593,8 +641,10 @@ Social Studies"></textarea>
           <button type="button" data-export-format="print">Print / Save as PDF</button>
         </div>
 
+        <p class="view-subheading hidden" id="student-withdrawn-note">Withdrawn students are hidden from class rosters, results entry, report cards, and promotions — but their records are kept. Reinstate brings them straight back.</p>
+
         <table class="data-table">
-          <thead><tr><th>Adm. No.</th><th>Name</th><th>Gender</th><th>Class</th><th>Parent</th><th></th></tr></thead>
+          <thead id="student-table-head"><tr><th>Adm. No.</th><th>Name</th><th>Gender</th><th>Class</th><th>Parent</th><th></th></tr></thead>
           <tbody id="student-table-body"><tr class="empty-row"><td colspan="6">Loading…</td></tr></tbody>
         </table>
         <div class="pagination-bar" id="student-pagination"></div>
@@ -631,6 +681,7 @@ Social Studies"></textarea>
               <select class="field-input" id="results-subject-select"></select>
             </div>
           </div>
+          <div id="results-class-bar"></div>
         </div>
 
         <div id="results-entry-notice"></div>
@@ -719,7 +770,7 @@ Social Studies"></textarea>
   </div>
 
   <div id="report-card-admin-panel" class="print-report-card no-print hidden" style="margin-bottom:16px;">
-    <h3 style="font-size:15px;margin-bottom:12px;">Comments &amp; term-end details (shown on the report card, editable before publishing)</h3>
+    <h3 style="font-size:15px;margin-bottom:12px;">Comments &amp; term-end details (shown on the report card — editable any time, even after publishing)</h3>
     <label class="field-label" for="rc-general-conduct">General conduct</label>
     <textarea class="field-input field-textarea" id="rc-general-conduct" rows="2"></textarea>
     <label class="field-label" for="rc-teacher-comment">Class teacher's remark</label>
@@ -802,6 +853,48 @@ Social Studies"></textarea>
         <button type="submit" class="btn btn-primary" id="session-wizard-submit-btn">Create session &amp; move forward</button>
       </div>
     </form>
+  </div>
+</div>
+
+<!-- ==========================================================================
+     CLASS SUBJECTS MODAL (Admin only)
+     Lets the admin pick exactly which subjects a given class takes — new
+     subjects are linked to every class by default when created, but not
+     every class does every subject (e.g. Creche vs. Basic 5), so this is
+     how that gets corrected. What's checked here is exactly what shows up
+     for that class's teacher on Enter Results and in Approvals.
+     ========================================================================== -->
+<div id="class-subjects-modal" class="modal-overlay hidden">
+  <div class="modal-card">
+    <h2 class="modal-title">Subjects for <span id="class-subjects-modal-name">this class</span></h2>
+    <p class="modal-body">Only the subjects checked below will be available to this class's teacher when entering results — untick anything this class doesn't take.</p>
+    <div id="class-subjects-modal-list" class="class-subjects-modal-list"></div>
+    <p id="class-subjects-modal-empty" class="panel-empty-state hidden">No subjects yet — add some from the Subjects panel first.</p>
+    <div class="form-actions">
+      <button type="button" class="btn btn-ghost-dark" id="class-subjects-modal-cancel">Cancel</button>
+      <button type="button" class="btn btn-primary" id="class-subjects-modal-save">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ==========================================================================
+     CONFIRM MODAL (global, replaces window.confirm() — driven by
+     showConfirmDialog() in script.js so every "are you sure?" prompt in
+     the app shares one polished, on-brand dialog instead of the browser's
+     native popup.)
+     ========================================================================== -->
+<div id="confirm-modal" class="modal-overlay hidden" role="alertdialog" aria-modal="true" aria-labelledby="confirm-modal-title" aria-describedby="confirm-modal-body">
+  <div class="modal-card confirm-modal-card">
+    <div class="confirm-modal-icon" id="confirm-modal-icon">
+      <svg id="confirm-modal-icon-question" width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M9.5 9a2.5 2.5 0 0 1 4.9.75c0 1.5-2.15 2-2.4 3.35M12 17.25h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="9.25" stroke="currentColor" stroke-width="1.6"/></svg>
+      <svg id="confirm-modal-icon-warning" class="hidden" width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M12 9v4.5M12 16.8h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M10.6 3.9 1.9 18.6a1.6 1.6 0 0 0 1.38 2.4h17.44a1.6 1.6 0 0 0 1.38-2.4L13.4 3.9a1.6 1.6 0 0 0-2.8 0Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+    </div>
+    <h2 class="modal-title" id="confirm-modal-title">Please confirm</h2>
+    <p class="modal-body" id="confirm-modal-body"></p>
+    <div class="form-actions confirm-modal-actions">
+      <button type="button" class="btn btn-ghost-dark" id="confirm-modal-cancel-btn">Cancel</button>
+      <button type="button" class="btn btn-primary" id="confirm-modal-ok-btn">Confirm</button>
+    </div>
   </div>
 </div>
 
