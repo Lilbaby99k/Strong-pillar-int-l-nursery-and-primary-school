@@ -241,7 +241,20 @@ async function tryClaimPendingAccount(authUser) {
     });
   }
 
-  await supabaseClient.from('pending_accounts').update({ claimed: true }).eq('id', pending.id);
+  const { error: claimErr } = await supabaseClient
+    .from('pending_accounts')
+    .update({ claimed: true })
+    .eq('id', pending.id);
+  if (claimErr) {
+    // The account is fully created and usable at this point — this is
+    // just the "mark the invite used" step. If it fails, don't block the
+    // person from getting into the app; just log it so it's traceable
+    // instead of failing invisibly. The Staff/Parents screens also filter
+    // out any invite whose email already has an active account (below),
+    // so a leftover unclaimed invite here won't show as a stale
+    // "Pending activation" duplicate either way.
+    console.error('Could not mark invite as claimed:', claimErr.message);
+  }
   return true;
 }
 
@@ -756,7 +769,15 @@ function enterAppShell() {
   renderUserSummary();
   renderTopbarContext();
   subscribeToActiveTermChanges();
-  navigateTo('dashboard');
+
+  // Establish the app's very first history entry with replaceState (not
+  // pushState) so this dashboard load doesn't stack on top of whatever
+  // page the browser was on before sign-in — from here on, navigateTo()
+  // pushes a new entry per screen, so Back moves screen-by-screen inside
+  // the app instead of leaving it.
+  history.replaceState({ viewKey: 'dashboard' }, '', '#dashboard');
+  navigateTo('dashboard', true);
+
   if (appState.user.role === 'admin') checkSessionRolloverPrompt();
 
   const pendingRc = sessionStorage.getItem('pendingReportCardId');
@@ -823,12 +844,28 @@ async function renderTopbarContext() {
    needs to add a <section id="view-<key>"> plus real content — no router
    rewrite required.
    ---------------------------------------------------------------------------- */
-function navigateTo(viewKey) {
+// `fromHistory` is true only when we're reacting to a Back/Forward button
+// press (see popstate listener below) — in that case the browser has
+// already moved us to the right history entry, so we must NOT push a new
+// one, or Back would feel like it does nothing / pushes you forward again.
+function navigateTo(viewKey, fromHistory = false) {
   setState({ currentView: viewKey });
 
   document.querySelectorAll('.sidebar-nav-item').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.viewKey === viewKey);
   });
+
+  if (!fromHistory) {
+    // Record this screen as its own entry in the browser's history so the
+    // Back/Forward buttons move between in-app screens instead of leaving
+    // the app. The user's Supabase session lives in localStorage and is
+    // completely untouched by this — moving through history never logs
+    // them out, it just changes which screen is shown.
+    const url = `#${viewKey}`;
+    if (window.location.hash !== url) {
+      history.pushState({ viewKey }, '', url);
+    }
+  }
 
   const content = document.getElementById('app-content');
   const existing = content.querySelector(`#view-${viewKey}`);
@@ -842,6 +879,18 @@ function navigateTo(viewKey) {
 
   renderPlaceholderView(viewKey);
 }
+
+// Fires on Back/Forward. We only ever push states of the shape
+// { viewKey } from navigateTo() above, so if that's what we find, just
+// re-render that screen (without pushing a duplicate history entry). If
+// there's no state (e.g. the user landed here from outside the app, or
+// this is the very first entry), fall back to the dashboard rather than
+// doing nothing.
+window.addEventListener('popstate', (event) => {
+  if (!appState.user || document.getElementById('view-app').classList.contains('hidden')) return;
+  const viewKey = (event.state && event.state.viewKey) || 'dashboard';
+  navigateTo(viewKey, true);
+});
 
 // Screens that need to (re)fetch their data every time the admin navigates
 // to them. Kept as one dispatch table rather than scattering calls through
@@ -1010,6 +1059,23 @@ document.addEventListener('DOMContentLoaded', () => {
       const sessionName = document.getElementById('wz-session-name').value.trim();
       const currentTermName = document.querySelector('input[name="wz-current-term"]:checked').value;
 
+      // If a previous attempt with this same session name got partway
+      // through (session created, but then failed before its terms were
+      // saved — e.g. this exact bug, now fixed, used to do that), that
+      // orphaned session row is still in the database and its name will
+      // collide with this new attempt. Clear out any same-named session
+      // that has zero terms before creating the real one, so retrying
+      // after a failed attempt just works instead of requiring manual
+      // SQL cleanup each time.
+      const { data: existingSessions } = await supabaseClient
+        .from('sessions')
+        .select('id, terms(id)')
+        .eq('name', sessionName);
+      const orphanIds = (existingSessions || []).filter(s => !s.terms || s.terms.length === 0).map(s => s.id);
+      if (orphanIds.length > 0) {
+        await supabaseClient.from('sessions').delete().in('id', orphanIds);
+      }
+
       const { data: session, error: sessionErr } = await supabaseClient
         .from('sessions')
         .insert({ name: sessionName, is_active: true })
@@ -1017,7 +1083,7 @@ document.addEventListener('DOMContentLoaded', () => {
         .single();
       if (sessionErr) throw sessionErr;
 
-      const termRows = Array.from(document.querySelectorAll('.wizard-term-row')).map(row => ({
+      const termRows = Array.from(document.querySelectorAll('#wizard-step-2 .wizard-term-row')).map(row => ({
         session_id: session.id,
         name: row.dataset.term,
         start_date: row.querySelector('[data-field="start"]').value || null,
@@ -1224,6 +1290,72 @@ function escapeHtml(str) {
   }[c]));
 }
 
+// Promise-based replacement for window.confirm(). Resolves true/false —
+// call sites just add `await` in front of the old `confirm(...)` call and
+// everything else about them (the `if (!... ) return;` guard) keeps working
+// unchanged. Renders the shared #confirm-modal markup in index.html rather
+// than the browser's native dialog, so it matches the rest of the app and
+// can carry a proper title, longer body copy, and a danger styling variant
+// for destructive actions (delete/withdraw/reject/cancel-invite).
+let resolveConfirmDialog = null;
+
+function showConfirmDialog(message, opts = {}) {
+  const {
+    title = 'Please confirm',
+    confirmLabel = 'Confirm',
+    cancelLabel = 'Cancel',
+    danger = false,
+  } = opts;
+
+  const overlay = document.getElementById('confirm-modal');
+  const card = overlay.querySelector('.confirm-modal-card');
+  const okBtn = document.getElementById('confirm-modal-ok-btn');
+  const cancelBtn = document.getElementById('confirm-modal-cancel-btn');
+
+  document.getElementById('confirm-modal-title').textContent = title;
+  document.getElementById('confirm-modal-body').textContent = message;
+  okBtn.textContent = confirmLabel;
+  cancelBtn.textContent = cancelLabel;
+
+  card.classList.toggle('is-danger', danger);
+  okBtn.classList.toggle('btn-danger', danger);
+  document.getElementById('confirm-modal-icon-question').classList.toggle('hidden', danger);
+  document.getElementById('confirm-modal-icon-warning').classList.toggle('hidden', !danger);
+
+  overlay.classList.remove('hidden');
+  okBtn.focus();
+
+  return new Promise((resolve) => {
+    resolveConfirmDialog = (result) => {
+      overlay.classList.add('hidden');
+      resolveConfirmDialog = null;
+      resolve(result);
+    };
+  });
+}
+
+// Wired once at bootstrap (section 28): OK/Cancel buttons, clicking the
+// dark backdrop, and Escape all resolve the pending promise. A stray Enter
+// keypress elsewhere in the app can't accidentally confirm something
+// destructive, because this only listens while the modal is actually open.
+function initConfirmDialog() {
+  const overlay = document.getElementById('confirm-modal');
+  document.getElementById('confirm-modal-ok-btn').addEventListener('click', () => {
+    if (resolveConfirmDialog) resolveConfirmDialog(true);
+  });
+  document.getElementById('confirm-modal-cancel-btn').addEventListener('click', () => {
+    if (resolveConfirmDialog) resolveConfirmDialog(false);
+  });
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay && resolveConfirmDialog) resolveConfirmDialog(false);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (!resolveConfirmDialog) return;
+    if (e.key === 'Escape') resolveConfirmDialog(false);
+    if (e.key === 'Enter') resolveConfirmDialog(true);
+  });
+}
+
 // Fires an outbound email via the school's Google Apps Script Web App, if
 // one has been configured in Settings. Deliberately fire-and-forget: a
 // failed or unconfigured notification should never block the underlying
@@ -1343,7 +1475,11 @@ async function loadStaffScreen() {
     .in('role', ['admin', 'teacher'])
     .eq('claimed', false);
 
-  const pending = (pendingRows || []).map(p => ({
+  const activeEmails = new Set(activeRows.map(r => (r.email || '').toLowerCase()));
+
+  const pending = (pendingRows || [])
+    .filter(p => !activeEmails.has((p.email || '').toLowerCase()))
+    .map(p => ({
     id: null,
     pendingId: p.id,
     full_name: p.full_name,
@@ -1395,7 +1531,7 @@ function renderStaffTable(rows) {
 
   tbody.querySelectorAll('[data-cancel-pending-staff]').forEach(btn => {
     btn.addEventListener('click', async () => {
-      if (!confirm('Cancel this pending invite? They will no longer be able to activate with this email.')) return;
+      if (!await showConfirmDialog('They will no longer be able to activate with this email.', { title: 'Cancel this invite?', confirmLabel: 'Cancel invite', danger: true })) return;
       showLoading();
       try {
         const { error } = await supabaseClient.from('pending_accounts').delete().eq('id', btn.dataset.cancelPendingStaff);
@@ -1561,7 +1697,11 @@ async function loadParentsScreen() {
     .eq('role', 'parent')
     .eq('claimed', false);
 
-  const pending = (pendingRows || []).map(p => ({
+  const activeParentEmails = new Set(activeRows.map(r => (r.email || '').toLowerCase()));
+
+  const pending = (pendingRows || [])
+    .filter(p => !activeParentEmails.has((p.email || '').toLowerCase()))
+    .map(p => ({
     id: null,
     pendingId: p.id,
     full_name: p.full_name,
@@ -1610,7 +1750,7 @@ function renderParentTable(rows) {
 
   tbody.querySelectorAll('[data-cancel-pending-parent]').forEach(btn => {
     btn.addEventListener('click', async () => {
-      if (!confirm('Cancel this pending invite?')) return;
+      if (!await showConfirmDialog('This invite will no longer be usable.', { title: 'Cancel this invite?', confirmLabel: 'Cancel invite', danger: true })) return;
       showLoading();
       try {
         const { error } = await supabaseClient.from('pending_accounts').delete().eq('id', btn.dataset.cancelPendingParent);
@@ -1754,25 +1894,29 @@ async function loadClassesScreen() {
 
 function renderClassesList() {
   const container = document.getElementById('classes-list');
-  if (classesWithArmsCache.length === 0) {
-    container.innerHTML = `<p class="view-subheading">No classes yet — add one above.</p>`;
+  const countNote = document.getElementById('classes-count-note');
+  const n = classesWithArmsCache.length;
+  if (countNote) countNote.textContent = n === 0 ? 'No classes yet' : `${n} class${n === 1 ? '' : 'es'}`;
+
+  if (n === 0) {
+    container.innerHTML = `<div class="panel-empty-state">No classes yet — add your first one above.</div>`;
     return;
   }
   container.innerHTML = classesWithArmsCache.map(c => {
     const arm = c.arms[0]; // every class has exactly one hidden arm behind the scenes
     return `
-    <div class="card class-card">
-      <div class="class-card-header">
-        <h3>${escapeHtml(c.name)}</h3>
-        <button type="button" class="icon-btn icon-btn-danger" data-delete-class="${c.id}">Delete class</button>
-      </div>
+    <div class="class-row">
+      <span class="class-row-name">${escapeHtml(c.name)}</span>
       ${arm ? `
-        <label class="field-label" for="class-teacher-${arm.id}">Class teacher</label>
-        <select class="field-input" style="max-width:280px;" id="class-teacher-${arm.id}" data-assign-arm="${arm.id}">
+        <select class="field-input" id="class-teacher-${arm.id}" data-assign-arm="${arm.id}">
           <option value="">— assign teacher —</option>
           ${teacherOptionsCache.map(t => `<option value="${t.id}" ${t.id === arm.class_teacher_id ? 'selected' : ''}>${escapeHtml(t.users.full_name)}</option>`).join('')}
         </select>
-      ` : ''}
+      ` : '<span></span>'}
+      <div class="class-row-actions">
+        <button type="button" class="class-row-subjects-btn" data-manage-subjects="${c.id}" data-class-name="${escapeHtml(c.name)}" title="Choose which subjects this class takes">Subjects</button>
+        <button type="button" class="class-row-delete" data-delete-class="${c.id}" title="Delete class" aria-label="Delete ${escapeHtml(c.name)}">✕</button>
+      </div>
     </div>
   `;
   }).join('');
@@ -1797,7 +1941,7 @@ function renderClassesList() {
 
   container.querySelectorAll('[data-delete-class]').forEach(btn => {
     btn.addEventListener('click', async () => {
-      if (!confirm('Delete this entire class? This cannot be undone.')) return;
+      if (!await showConfirmDialog('This cannot be undone.', { title: 'Delete this entire class?', confirmLabel: 'Delete class', danger: true })) return;
       showLoading();
       try {
         const { error } = await supabaseClient.from('classes').delete().eq('id', btn.dataset.deleteClass);
@@ -1810,24 +1954,129 @@ function renderClassesList() {
       }
     });
   });
+
+  container.querySelectorAll('[data-manage-subjects]').forEach(btn => {
+    btn.addEventListener('click', () => openClassSubjectsModal(btn.dataset.manageSubjects, btn.dataset.className));
+  });
 }
+
+/* ----------------------------------------------------------------------------
+   CLASS SUBJECTS MODAL — lets the admin pick exactly which subjects a given
+   class takes, since not every class does the same subjects (e.g. Creche
+   vs. Basic 5). This is what results entry/approvals filter subjects by,
+   so getting this right is what stops a teacher from ever being able to
+   enter a score for a subject their class doesn't actually take.
+   ---------------------------------------------------------------------------- */
+let classSubjectsModalClassId = null;
+
+async function openClassSubjectsModal(classId, className) {
+  classSubjectsModalClassId = classId;
+  document.getElementById('class-subjects-modal-name').textContent = className || 'this class';
+
+  const listEl = document.getElementById('class-subjects-modal-list');
+  const emptyEl = document.getElementById('class-subjects-modal-empty');
+
+  if (subjectsCache.length === 0) {
+    listEl.classList.add('hidden');
+    emptyEl.classList.remove('hidden');
+  } else {
+    listEl.classList.remove('hidden');
+    emptyEl.classList.add('hidden');
+
+    const { data: links } = await supabaseClient
+      .from('class_subjects')
+      .select('subject_id')
+      .eq('class_id', classId);
+    const linkedIds = new Set((links || []).map(l => l.subject_id));
+
+    listEl.innerHTML = subjectsCache.map(s => `
+      <label class="class-subjects-modal-row">
+        <input type="checkbox" value="${s.id}" ${linkedIds.has(s.id) ? 'checked' : ''}>
+        <span>${escapeHtml(s.name)}</span>
+        ${s.code ? `<span class="subject-chip-code">${escapeHtml(s.code)}</span>` : ''}
+      </label>
+    `).join('');
+  }
+
+  document.getElementById('class-subjects-modal').classList.remove('hidden');
+}
+
+function closeClassSubjectsModal() {
+  document.getElementById('class-subjects-modal').classList.add('hidden');
+  classSubjectsModalClassId = null;
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('class-subjects-modal-cancel').addEventListener('click', closeClassSubjectsModal);
+
+  document.getElementById('class-subjects-modal-save').addEventListener('click', async () => {
+    const classId = classSubjectsModalClassId;
+    if (!classId) return;
+
+    const checkedIds = Array.from(
+      document.querySelectorAll('#class-subjects-modal-list input[type="checkbox"]:checked')
+    ).map(cb => cb.value);
+
+    showLoading();
+    try {
+      const { data: existing, error: existingErr } = await supabaseClient
+        .from('class_subjects')
+        .select('subject_id')
+        .eq('class_id', classId);
+      if (existingErr) throw existingErr;
+
+      const existingIds = new Set((existing || []).map(l => l.subject_id));
+      const checkedSet = new Set(checkedIds);
+
+      const toAdd = checkedIds.filter(id => !existingIds.has(id));
+      const toRemove = [...existingIds].filter(id => !checkedSet.has(id));
+
+      if (toAdd.length > 0) {
+        const { error: addErr } = await supabaseClient
+          .from('class_subjects')
+          .insert(toAdd.map(subject_id => ({ class_id: classId, subject_id })));
+        if (addErr) throw addErr;
+      }
+      if (toRemove.length > 0) {
+        const { error: removeErr } = await supabaseClient
+          .from('class_subjects')
+          .delete()
+          .eq('class_id', classId)
+          .in('subject_id', toRemove);
+        if (removeErr) throw removeErr;
+      }
+
+      showToast('Subjects updated for this class.', 'success');
+      closeClassSubjectsModal();
+    } catch (err) {
+      showToast(err.message || 'Could not update subjects.', 'error');
+    } finally {
+      hideLoading();
+    }
+  });
+});
 
 function renderSubjectsChips() {
   const container = document.getElementById('subjects-chip-list');
-  if (subjectsCache.length === 0) {
-    container.innerHTML = `<p class="view-subheading">No subjects yet.</p>`;
+  const countNote = document.getElementById('subjects-count-note');
+  const n = subjectsCache.length;
+  if (countNote) countNote.textContent = n === 0 ? 'No subjects yet' : `${n} subject${n === 1 ? '' : 's'}`;
+
+  if (n === 0) {
+    container.innerHTML = `<div class="panel-empty-state">No subjects yet — add your first one above.</div>`;
     return;
   }
   container.innerHTML = subjectsCache.map(s => `
-    <span class="class-arm-chip">
-      ${escapeHtml(s.name)}${s.code ? ` (${escapeHtml(s.code)})` : ''}
-      <button type="button" data-delete-subject="${s.id}" title="Remove subject">✕</button>
+    <span class="subject-chip">
+      ${escapeHtml(s.name)}
+      ${s.code ? `<span class="subject-chip-code">${escapeHtml(s.code)}</span>` : ''}
+      <button type="button" data-delete-subject="${s.id}" title="Remove subject" aria-label="Remove ${escapeHtml(s.name)}">✕</button>
     </span>
   `).join('');
 
   container.querySelectorAll('[data-delete-subject]').forEach(btn => {
     btn.addEventListener('click', async () => {
-      if (!confirm('Remove this subject from all classes?')) return;
+      if (!await showConfirmDialog('It will be removed from every class that currently teaches it.', { title: 'Remove this subject?', confirmLabel: 'Remove subject', danger: true })) return;
       showLoading();
       try {
         const { error } = await supabaseClient.from('subjects').delete().eq('id', btn.dataset.deleteSubject);
@@ -1903,8 +2152,10 @@ document.addEventListener('DOMContentLoaded', () => {
 /* ----------------------------------------------------------------------------
    15. ADMIN CRUD — STUDENTS
    ---------------------------------------------------------------------------- */
-let studentCache = [];
+let studentCache = [];       // students matching the currently selected tab (active or withdrawn)
+let allStudentCache = [];    // every student, unfiltered — the search box and tab switch both filter from this
 let studentPage = 1;
+let studentStatusTab = 'active'; // 'active' | 'withdrawn'
 
 async function populateStudentClassArmSelects() {
   await refreshClassesWithArmsCache();
@@ -1921,7 +2172,7 @@ async function loadStudentsScreen() {
 
   const { data: students, error } = await supabaseClient
     .from('students')
-    .select('id, admission_number, full_name, gender, date_of_birth, passport_url, parent_id, parent_name, parent_phone, parent_email');
+    .select('id, admission_number, full_name, gender, date_of_birth, passport_url, parent_id, parent_name, parent_phone, parent_email, enrollment_status, withdrawn_at, parent_auto_deactivated');
   if (error) { showToast(error.message, 'error'); return; }
 
   const { data: parents } = await supabaseClient.from('parents').select('id, users(full_name, email)');
@@ -1931,15 +2182,19 @@ async function loadStudentsScreen() {
     if (p.users) { linkedParentNameById[p.id] = p.users.full_name; linkedParentEmailById[p.id] = p.users.email; }
   });
 
+  // Withdrawn students may have no current-term enrollment row at all (if
+  // they were withdrawn a session or more ago), so this join is best-effort
+  // for the "Class" column — it's never relied on for correctness.
   let enrollmentsQuery = supabaseClient
     .from('enrollments')
-    .select('student_id, classes(name), class_arms(name)');
+    .select('student_id, classes(name), class_arms(name)')
+    .neq('status', 'withdrawn');
   if (appState.activeTermId) enrollmentsQuery = enrollmentsQuery.eq('term_id', appState.activeTermId);
   const { data: enrollments } = await enrollmentsQuery;
   const enrollmentByStudent = {};
   (enrollments || []).forEach(e => { enrollmentByStudent[e.student_id] = e; });
 
-  studentCache = (students || []).map(s => ({
+  allStudentCache = (students || []).map(s => ({
     id: s.id,
     admission_number: s.admission_number,
     full_name: s.full_name,
@@ -1951,13 +2206,39 @@ async function loadStudentsScreen() {
     parent_phone: s.parent_phone || '',
     parent_contact_email: s.parent_email || '',
     linked_parent_email: s.parent_id ? (linkedParentEmailById[s.parent_id] || '') : '',
+    enrollment_status: s.enrollment_status || 'active',
+    withdrawn_at: s.withdrawn_at,
+    parent_auto_deactivated: !!s.parent_auto_deactivated,
     class_arm: enrollmentByStudent[s.id]
       ? (enrollmentByStudent[s.id].classes?.name || '—')
       : 'Not enrolled this term',
     display_parent_name: s.parent_id ? (linkedParentNameById[s.parent_id] || s.parent_name || '—') : (s.parent_name || 'Unlinked'),
   }));
 
-  renderStudentTable(studentCache);
+  applyStudentTabFilter();
+}
+
+// Re-derives studentCache from allStudentCache for the current tab, and
+// re-renders. Called on tab switch and after any load/refresh.
+function applyStudentTabFilter() {
+  document.querySelectorAll('#student-status-tabs [data-student-tab]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.studentTab === studentStatusTab);
+  });
+  document.getElementById('student-withdrawn-note').classList.toggle('hidden', studentStatusTab !== 'withdrawn');
+  document.getElementById('student-add-btn').classList.toggle('hidden', studentStatusTab === 'withdrawn');
+
+  const head = document.getElementById('student-table-head');
+  head.innerHTML = studentStatusTab === 'withdrawn'
+    ? '<tr><th>Adm. No.</th><th>Name</th><th>Gender</th><th>Withdrawn on</th><th>Parent</th><th></th></tr>'
+    : '<tr><th>Adm. No.</th><th>Name</th><th>Gender</th><th>Class</th><th>Parent</th><th></th></tr>';
+
+  studentPage = 1;
+  const q = document.getElementById('student-search').value.trim().toLowerCase();
+  studentCache = allStudentCache.filter(r => r.enrollment_status === studentStatusTab);
+  const filtered = q
+    ? studentCache.filter(r => r.full_name.toLowerCase().includes(q) || r.admission_number.toLowerCase().includes(q))
+    : studentCache;
+  renderStudentTable(filtered);
 }
 
 let studentEditContext = null; // student id currently being edited, or null when adding
@@ -1965,23 +2246,31 @@ let studentEditContext = null; // student id currently being edited, or null whe
 function renderStudentTable(rows) {
   const { pageRows } = paginate(rows, studentPage, 'student-pagination', (p) => { studentPage = p; renderStudentTable(rows); });
   const tbody = document.getElementById('student-table-body');
+  const emptyMessage = studentStatusTab === 'withdrawn' ? 'No withdrawn students.' : 'No students yet — add one above.';
   if (rows.length === 0) {
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="6">No students yet — add one above.</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="6">${emptyMessage}</td></tr>`;
     return;
   }
-  tbody.innerHTML = pageRows.map(r => `
+
+  tbody.innerHTML = pageRows.map(r => {
+    const fourthCell = studentStatusTab === 'withdrawn'
+      ? escapeHtml(r.withdrawn_at ? new Date(r.withdrawn_at).toLocaleDateString() : '—')
+      : escapeHtml(r.class_arm);
+    const actions = studentStatusTab === 'withdrawn'
+      ? `<button type="button" class="icon-btn" data-reinstate="${r.id}">Reinstate</button>`
+      : `<button type="button" class="icon-btn" data-edit-student="${r.id}">Edit</button>
+         <button type="button" class="icon-btn" data-transfer="${r.id}">Transfer</button>
+         <button type="button" class="icon-btn icon-btn-danger" data-withdraw="${r.id}">Withdraw</button>`;
+    return `
     <tr>
       <td>${escapeHtml(r.admission_number)}</td>
       <td>${escapeHtml(r.full_name)}</td>
       <td>${escapeHtml(r.gender || '—')}</td>
-      <td>${escapeHtml(r.class_arm)}</td>
+      <td>${fourthCell}</td>
       <td>${escapeHtml(r.display_parent_name)}${r.parent_id ? ' <span class="badge badge-success">Linked</span>' : ''}</td>
-      <td>
-        <button type="button" class="icon-btn" data-edit-student="${r.id}">Edit</button>
-        <button type="button" class="icon-btn" data-transfer="${r.id}">Transfer</button>
-      </td>
-    </tr>
-  `).join('');
+      <td>${actions}</td>
+    </tr>`;
+  }).join('');
 
   tbody.querySelectorAll('[data-edit-student]').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -1992,6 +2281,14 @@ function renderStudentTable(rows) {
 
   tbody.querySelectorAll('[data-transfer]').forEach(btn => {
     btn.addEventListener('click', () => openTransferPrompt(btn.dataset.transfer));
+  });
+
+  tbody.querySelectorAll('[data-withdraw]').forEach(btn => {
+    btn.addEventListener('click', () => withdrawStudent(btn.dataset.withdraw));
+  });
+
+  tbody.querySelectorAll('[data-reinstate]').forEach(btn => {
+    btn.addEventListener('click', () => reinstateStudent(btn.dataset.reinstate));
   });
 }
 
@@ -2057,6 +2354,142 @@ async function openTransferPrompt(studentId) {
     loadStudentsScreen();
   } catch (err) {
     showToast(err.message || 'Could not transfer student.', 'error');
+  } finally {
+    hideLoading();
+  }
+}
+
+/* ----------------------------------------------------------------------------
+   15b. WITHDRAW / REINSTATE STUDENTS
+   A student who suddenly leaves the school moves to enrollment_status =
+   'withdrawn' rather than being deleted: their current-term enrollment row
+   (and every past result/report card that hangs off it) is kept, just
+   flagged, so they're invisible to the day-to-day screens (My Class, Enter
+   Results, Report Cards, Promotions) but fully restorable. If this was
+   their parent's only active child, the parent's login is switched off too
+   — and switched back on automatically on Reinstate, but only if THIS
+   withdrawal is what turned it off (students.parent_auto_deactivated), so
+   an admin's own unrelated deactivation of that parent is never overridden.
+   ---------------------------------------------------------------------------- */
+async function countOtherActiveChildren(parentId, excludingStudentId) {
+  if (!parentId) return 0;
+  const { count } = await supabaseClient
+    .from('students')
+    .select('id', { count: 'exact', head: true })
+    .eq('parent_id', parentId)
+    .eq('enrollment_status', 'active')
+    .neq('id', excludingStudentId);
+  return count || 0;
+}
+
+async function withdrawStudent(studentId) {
+  const student = allStudentCache.find(s => s.id === studentId);
+  if (!student) return;
+
+  if (!await showConfirmDialog(`They'll move to the Withdrawn tab and disappear from class rosters, results entry, report cards, and promotions — but every past record is kept and they can be reinstated anytime.`, { title: `Withdraw ${student.full_name}?`, confirmLabel: 'Withdraw', danger: true })) return;
+
+  showLoading();
+  try {
+    const { error: studentErr } = await supabaseClient
+      .from('students')
+      .update({ enrollment_status: 'withdrawn', withdrawn_at: new Date().toISOString() })
+      .eq('id', studentId);
+    if (studentErr) throw studentErr;
+
+    // Flag (not delete) their current-term enrollment, if they have one —
+    // keeps every result/report card linked to it intact.
+    if (appState.activeTermId) {
+      await supabaseClient
+        .from('enrollments')
+        .update({ status: 'withdrawn' })
+        .eq('student_id', studentId)
+        .eq('term_id', appState.activeTermId);
+    }
+
+    let parentNote = '';
+    if (student.parent_id) {
+      const remaining = await countOtherActiveChildren(student.parent_id, studentId);
+      if (remaining === 0) {
+        const { error: userErr } = await supabaseClient
+          .from('users').update({ is_active: false }).eq('id', student.parent_id);
+        if (!userErr) {
+          await supabaseClient.from('students').update({ parent_auto_deactivated: true }).eq('id', studentId);
+          parentNote = " Their parent's login has also been deactivated (no other active children) — it'll switch back on if this student is reinstated.";
+        }
+      }
+    }
+
+    showToast(`${student.full_name} withdrawn.${parentNote}`, 'success');
+    loadStudentsScreen();
+  } catch (err) {
+    showToast(err.message || 'Could not withdraw student.', 'error');
+  } finally {
+    hideLoading();
+  }
+}
+
+async function reinstateStudent(studentId) {
+  const student = allStudentCache.find(s => s.id === studentId);
+  if (!student) return;
+
+  if (!appState.activeSessionId || !appState.activeTermId) {
+    showToast('No active academic session/term is set — set one in Settings before reinstating students.', 'error');
+    return;
+  }
+  if (!await showConfirmDialog(`They'll move back to Active and reappear on class rosters and results entry.`, { title: `Reinstate ${student.full_name}?`, confirmLabel: 'Reinstate' })) return;
+
+  showLoading();
+  try {
+    // If they already have a row for the current term (most common case —
+    // withdrawn this same term), just flip it back to active in place.
+    const { data: existingEnrollment } = await supabaseClient
+      .from('enrollments').select('id, status')
+      .eq('student_id', studentId).eq('term_id', appState.activeTermId).maybeSingle();
+
+    if (existingEnrollment) {
+      if (existingEnrollment.status === 'withdrawn') {
+        await supabaseClient.from('enrollments').update({ status: 'active' }).eq('id', existingEnrollment.id);
+      }
+    } else {
+      // No enrollment for the current term (withdrawn a session or more
+      // ago) — need a class to put them back into, same as adding a new
+      // student.
+      await refreshClassesWithArmsCache();
+      if (classesWithArmsCache.length === 0) throw new Error('No classes exist yet — add one under Classes & Subjects first.');
+      const options = classesWithArmsCache.map(c => `${c.name} → id:${c.id}`).join('\n');
+      const classId = prompt(`${student.full_name} has no enrollment for the current term. Which class should they rejoin? Enter the class's ID from this list:\n\n${options}`);
+      if (!classId) { hideLoading(); return; }
+      const targetClass = classesWithArmsCache.find(c => c.id === classId.trim());
+      if (!targetClass || !targetClass.arms[0]) throw new Error("Class ID not recognized — copy it exactly from the list. They're still withdrawn; try Reinstate again.");
+
+      const { error: enrollErr } = await supabaseClient.from('enrollments').insert({
+        student_id: studentId,
+        session_id: appState.activeSessionId,
+        term_id: appState.activeTermId,
+        class_id: targetClass.id,
+        arm_id: targetClass.arms[0].id,
+        status: 'active',
+      });
+      if (enrollErr) throw enrollErr;
+    }
+
+    const { error: studentErr } = await supabaseClient
+      .from('students')
+      .update({ enrollment_status: 'active', withdrawn_at: null })
+      .eq('id', studentId);
+    if (studentErr) throw studentErr;
+
+    let parentNote = '';
+    if (student.parent_id && student.parent_auto_deactivated) {
+      await supabaseClient.from('users').update({ is_active: true }).eq('id', student.parent_id);
+      await supabaseClient.from('students').update({ parent_auto_deactivated: false }).eq('id', studentId);
+      parentNote = " Their parent's login has been reactivated.";
+    }
+
+    showToast(`${student.full_name} reinstated.${parentNote}`, 'success');
+    loadStudentsScreen();
+  } catch (err) {
+    showToast(err.message || 'Could not reinstate student.', 'error');
   } finally {
     hideLoading();
   }
@@ -2136,11 +2569,13 @@ document.addEventListener('DOMContentLoaded', () => {
     resetStudentForm();
     toggleInlineForm('student-form-card', false);
   });
-  document.getElementById('student-search').addEventListener('input', (e) => {
-    const q = e.target.value.trim().toLowerCase();
-    studentPage = 1;
-    renderStudentTable(studentCache.filter(r =>
-      r.full_name.toLowerCase().includes(q) || r.admission_number.toLowerCase().includes(q)));
+  document.getElementById('student-search').addEventListener('input', () => applyStudentTabFilter());
+  document.querySelectorAll('#student-status-tabs [data-student-tab]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      studentStatusTab = btn.dataset.studentTab;
+      toggleInlineForm('student-form-card', false);
+      applyStudentTabFilter();
+    });
   });
   document.getElementById('student-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -2286,7 +2721,8 @@ async function loadMyClassScreen() {
       .from('enrollments')
       .select('id, students(admission_number, full_name, gender)')
       .eq('arm_id', arm.id)
-      .eq('term_id', appState.activeTermId);
+      .eq('term_id', appState.activeTermId)
+      .neq('status', 'withdrawn');
 
     html += `
       <div class="card">
@@ -2346,6 +2782,7 @@ async function loadResultsScreen() {
 
   await populateResultsSubjectSelect(resultsScreenState.armId);
   await renderResultsEntryTable();
+  await renderResultsClassBar();
 }
 
 async function populateResultsSubjectSelect(armId) {
@@ -2361,6 +2798,74 @@ async function populateResultsSubjectSelect(armId) {
   const subjects = (links || []).map(l => l.subjects).filter(Boolean);
   subjectSelect.innerHTML = subjects.map(s => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
   resultsScreenState.subjectId = subjects[0] ? subjects[0].id : null;
+}
+
+async function getClassDraftResultIds(armId) {
+  const { data: enrollments } = await supabaseClient
+    .from('enrollments')
+    .select('id')
+    .eq('arm_id', armId)
+    .eq('term_id', appState.activeTermId)
+    .neq('status', 'withdrawn');
+  const enrollmentIds = (enrollments || []).map(e => e.id);
+  if (enrollmentIds.length === 0) return [];
+
+  // A "draft" row in the DB always has both CA and Exam scores set — see
+  // saveAllResultsAsDraft's comment above — so unlike the per-subject
+  // submit button (which checks the on-screen table), these are already
+  // known-complete and can be submitted straight from the database.
+  const { data: results } = await supabaseClient
+    .from('results')
+    .select('id')
+    .eq('term_id', appState.activeTermId)
+    .eq('status', 'draft')
+    .in('enrollment_id', enrollmentIds);
+  return (results || []).map(r => r.id);
+}
+
+// Class-wide "submit all drafts" — lets a teacher clear every subject's
+// draft scores for the selected class in one action, instead of switching
+// the Subject dropdown and clicking "Submit all drafts" once per subject.
+async function renderResultsClassBar() {
+  const bar = document.getElementById('results-class-bar');
+  if (!bar || !resultsScreenState.armId || !resultsScreenState.termOpen) {
+    if (bar) bar.innerHTML = '';
+    return;
+  }
+
+  const arm = (await getTeacherArms()).find(a => a.id === resultsScreenState.armId);
+  const className = arm ? arm.classes.name : 'this class';
+  const draftIds = await getClassDraftResultIds(resultsScreenState.armId);
+
+  if (draftIds.length === 0) {
+    bar.innerHTML = '';
+    return;
+  }
+
+  bar.innerHTML = `
+    <div class="table-toolbar" style="margin-top: 12px;">
+      <span class="view-subheading">${draftIds.length} draft result(s) ready across all subjects for ${escapeHtml(className)}</span>
+      <button type="button" class="btn btn-primary" id="submit-all-class-btn">Submit all drafts for this class</button>
+    </div>
+  `;
+  document.getElementById('submit-all-class-btn').addEventListener('click', async () => {
+    if (!await showConfirmDialog(`This submits all ${draftIds.length} draft result(s) across every subject for ${className}. You won't be able to edit them until an admin reviews.`, { title: 'Submit for admin approval?', confirmLabel: 'Submit for approval' })) return;
+    showLoading();
+    try {
+      const { error } = await supabaseClient
+        .from('results').update({ status: 'submitted' })
+        .in('id', draftIds).eq('status', 'draft');
+      if (error) throw error;
+      showToast(`${draftIds.length} result(s) submitted for approval.`, 'success');
+      renderResultsEntryTable();
+      renderResultsClassBar();
+      notifyAdminsResultsSubmittedForClass(className, draftIds.length);
+    } catch (err) {
+      showToast(err.message || 'Could not submit.', 'error');
+    } finally {
+      hideLoading();
+    }
+  });
 }
 
 async function renderResultsEntryTable() {
@@ -2387,7 +2892,8 @@ async function renderResultsEntryTable() {
     .from('enrollments')
     .select('id, student_id, students(full_name)')
     .eq('arm_id', resultsScreenState.armId)
-    .eq('term_id', appState.activeTermId);
+    .eq('term_id', appState.activeTermId)
+    .neq('status', 'withdrawn');
 
   if (!enrollments || enrollments.length === 0) {
     notice.innerHTML = `<div class="card card-notice"><p>No students enrolled in this class for the current term yet.</p></div>`;
@@ -2585,6 +3091,7 @@ async function saveAllResultsAsDraft() {
     if (error) throw error;
     showToast(`Saved ${toSave.length} student score(s) as draft.`, 'success');
     renderResultsEntryTable();
+    renderResultsClassBar();
   } catch (err) {
     showToast(err.message || 'Could not save.', 'error');
   } finally {
@@ -2603,6 +3110,7 @@ async function reopenResultRow(enrollmentId) {
     if (error) throw error;
     showToast('Reopened for editing.', 'success');
     renderResultsEntryTable();
+    renderResultsClassBar();
   } catch (err) {
     showToast(err.message || 'Could not reopen.', 'error');
   } finally {
@@ -2615,6 +3123,7 @@ document.addEventListener('DOMContentLoaded', () => {
     resultsScreenState.armId = e.target.value;
     await populateResultsSubjectSelect(resultsScreenState.armId);
     renderResultsEntryTable();
+    renderResultsClassBar();
   });
   document.getElementById('results-subject-select').addEventListener('change', (e) => {
     resultsScreenState.subjectId = e.target.value;
@@ -2641,7 +3150,7 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    if (!confirm(`Submit ${draftRows.length} result(s) for admin approval? You won't be able to edit them until an admin reviews.`)) return;
+    if (!await showConfirmDialog(`This submits ${draftRows.length} result(s) for admin approval. You won't be able to edit them until an admin reviews.`, { title: 'Submit for admin approval?', confirmLabel: 'Submit for approval' })) return;
 
     showLoading();
     try {
@@ -2657,6 +3166,7 @@ document.addEventListener('DOMContentLoaded', () => {
       showToast('Submitted for approval.', 'success');
       notifyAdminsResultsSubmitted(draftRows.length);
       renderResultsEntryTable();
+      renderResultsClassBar();
     } catch (err) {
       showToast(err.message || 'Could not submit.', 'error');
     } finally {
@@ -2692,9 +3202,36 @@ async function notifyAdminsResultsSubmitted(count) {
   }
 }
 
+// Class-wide variant of notifyAdminsResultsSubmitted, fired by "Submit all
+// drafts for this class" — the message doesn't name one subject since the
+// submission spans every subject with drafts ready for this class.
+async function notifyAdminsResultsSubmittedForClass(className, count) {
+  try {
+    const { data: admins } = await supabaseClient.rpc('notification_emails', { p_role: 'admin' });
+    const recipients = (admins || []).map(a => a.email).filter(Boolean);
+    if (recipients.length === 0) return;
+
+    sendAppsScriptBulkEmail({
+      recipients,
+      subject: `Results submitted for approval — ${className}`,
+      body: `${appState.user.full_name} has submitted ${count} result(s) across multiple subjects for ${className} for your approval.\n\nGo to Result Approvals in your dashboard to review.\n\n— ${appState.schoolSettings?.school_name || 'The school'}`,
+    });
+  } catch (err) {
+    console.warn('Could not notify admins of submitted results:', err);
+  }
+}
+
 /* ----------------------------------------------------------------------------
    18. ADMIN — RESULT APPROVALS
    ---------------------------------------------------------------------------- */
+async function getArmTeacherContact(armId) {
+  const arm = classesWithArmsCache.flatMap(c => c.arms).find(a => a.id === armId);
+  const teacherId = arm && arm.class_teacher_id;
+  if (!teacherId) return null;
+  const { data: teacherStaff } = await supabaseClient.from('staff').select('users(full_name, email)').eq('id', teacherId).single();
+  return teacherStaff && teacherStaff.users ? teacherStaff.users : null;
+}
+
 let approvalsState = { armId: null, subjectId: null };
 
 async function loadApprovalsScreen() {
@@ -2727,6 +3264,7 @@ async function loadApprovalsScreen() {
           <select class="field-input" id="approvals-subject-select"></select>
         </div>
       </div>
+      <div id="approvals-class-bar"></div>
     </div>
     <div id="approvals-table-wrap"></div>
   `;
@@ -2735,6 +3273,7 @@ async function loadApprovalsScreen() {
     approvalsState.armId = e.target.value;
     await populateApprovalsSubjectSelect();
     renderApprovalsTable();
+    renderApprovalsClassBar();
   });
   document.getElementById('approvals-subject-select').addEventListener('change', (e) => {
     approvalsState.subjectId = e.target.value;
@@ -2743,6 +3282,80 @@ async function loadApprovalsScreen() {
 
   await populateApprovalsSubjectSelect();
   renderApprovalsTable();
+  renderApprovalsClassBar();
+}
+
+/* ----------------------------------------------------------------------------
+   Class-wide "approve all pending" — lets an admin clear every subject's
+   pending results for the selected class in one action, instead of having
+   to switch the Subject dropdown and click "Approve all shown" once per
+   subject. Independent of the subject filter above: it always looks at
+   every submitted result for the whole class in the active term.
+   ---------------------------------------------------------------------------- */
+async function getClassPendingResultIds(armId) {
+  const { data: enrollments } = await supabaseClient
+    .from('enrollments')
+    .select('id')
+    .eq('arm_id', armId)
+    .eq('term_id', appState.activeTermId)
+    .neq('status', 'withdrawn');
+  const enrollmentIds = (enrollments || []).map(e => e.id);
+  if (enrollmentIds.length === 0) return [];
+
+  const { data: results } = await supabaseClient
+    .from('results')
+    .select('id')
+    .eq('term_id', appState.activeTermId)
+    .eq('status', 'submitted')
+    .in('enrollment_id', enrollmentIds);
+  return (results || []).map(r => r.id);
+}
+
+async function renderApprovalsClassBar() {
+  const bar = document.getElementById('approvals-class-bar');
+  if (!bar || !approvalsState.armId) return;
+
+  const arm = classesWithArmsCache.flatMap(c => c.arms.map(a => ({ ...a, className: c.name }))).find(a => a.id === approvalsState.armId);
+  const className = arm ? arm.className : 'this class';
+  const pendingIds = await getClassPendingResultIds(approvalsState.armId);
+
+  if (pendingIds.length === 0) {
+    bar.innerHTML = '';
+    return;
+  }
+
+  bar.innerHTML = `
+    <div class="table-toolbar" style="margin-top: 12px;">
+      <span class="view-subheading">${pendingIds.length} result(s) pending across all subjects for ${escapeHtml(className)}</span>
+      <button type="button" class="btn btn-primary" id="approve-all-class-btn">Approve all pending for this class</button>
+    </div>
+  `;
+  document.getElementById('approve-all-class-btn').addEventListener('click', async () => {
+    if (!await showConfirmDialog(`This approves all ${pendingIds.length} pending result(s) across every subject for ${className}.`, { title: 'Approve all pending results?', confirmLabel: 'Approve all' })) return;
+    showLoading();
+    try {
+      const { error } = await supabaseClient
+        .from('results').update({ status: 'approved' })
+        .in('id', pendingIds).eq('status', 'submitted');
+      if (error) throw error;
+      showToast(`${pendingIds.length} result(s) approved for ${className}.`, 'success');
+      renderApprovalsTable();
+      renderApprovalsClassBar();
+
+      getArmTeacherContact(approvalsState.armId).then(teacher => {
+        if (!teacher || !teacher.email) return;
+        sendAppsScriptEmail({
+          to: teacher.email,
+          subject: `Results approved — ${className}`,
+          body: `Hello ${teacher.full_name},\n\nYour submitted results for ${className} (${pendingIds.length} result(s) across all subjects) have been reviewed and approved.\n\nNo further action is needed — they're now part of the students' report cards.\n\n— ${appState.schoolSettings?.school_name || 'The school'}`,
+        });
+      });
+    } catch (err) {
+      showToast(err.message || 'Could not approve.', 'error');
+    } finally {
+      hideLoading();
+    }
+  });
 }
 
 async function populateApprovalsSubjectSelect() {
@@ -2764,7 +3377,8 @@ async function renderApprovalsTable() {
     .from('enrollments')
     .select('id, students(full_name)')
     .eq('arm_id', approvalsState.armId)
-    .eq('term_id', appState.activeTermId);
+    .eq('term_id', appState.activeTermId)
+    .neq('status', 'withdrawn');
 
   const { data: results } = await supabaseClient
     .from('results')
@@ -2812,7 +3426,7 @@ async function renderApprovalsTable() {
     btn.addEventListener('click', () => rejectResult(btn.dataset.reject));
   });
   document.getElementById('approve-all-btn').addEventListener('click', async () => {
-    if (!confirm(`Approve all ${submitted.length} submitted result(s) shown?`)) return;
+    if (!await showConfirmDialog(`This approves all ${submitted.length} submitted result(s) shown.`, { title: 'Approve all shown results?', confirmLabel: 'Approve all' })) return;
     showLoading();
     try {
       const { error } = await supabaseClient
@@ -2821,6 +3435,19 @@ async function renderApprovalsTable() {
       if (error) throw error;
       showToast('All shown results approved.', 'success');
       renderApprovalsTable();
+      renderApprovalsClassBar();
+
+      const arm = classesWithArmsCache.flatMap(c => c.arms.map(a => ({ ...a, className: c.name }))).find(a => a.id === approvalsState.armId);
+      const subjectOption = document.getElementById('approvals-subject-select').selectedOptions[0];
+      const subjectName = subjectOption ? subjectOption.textContent : 'a subject';
+      getArmTeacherContact(approvalsState.armId).then(teacher => {
+        if (!teacher || !teacher.email) return;
+        sendAppsScriptEmail({
+          to: teacher.email,
+          subject: `Results approved — ${arm ? arm.className : 'your class'} · ${subjectName}`,
+          body: `Hello ${teacher.full_name},\n\nYour submitted results for ${arm ? arm.className : 'your class'} · ${subjectName} (${submitted.length} result(s)) have been reviewed and approved.\n\nNo further action is needed — they're now part of the students' report cards.\n\n— ${appState.schoolSettings?.school_name || 'The school'}`,
+        });
+      });
     } catch (err) {
       showToast(err.message || 'Could not approve.', 'error');
     } finally {
@@ -2836,6 +3463,7 @@ async function approveResult(resultId) {
     if (error) throw error;
     showToast('Approved.', 'success');
     renderApprovalsTable();
+    renderApprovalsClassBar();
   } catch (err) {
     showToast(err.message || 'Could not approve.', 'error');
   } finally {
@@ -2856,6 +3484,7 @@ async function rejectResult(resultId) {
     if (error) throw error;
     showToast('Rejected and sent back to the teacher.', 'success');
     renderApprovalsTable();
+    renderApprovalsClassBar();
   } catch (err) {
     showToast(err.message || 'Could not reject.', 'error');
   } finally {
@@ -2931,7 +3560,8 @@ async function generateReportCardsForArm() {
       .from('enrollments')
       .select('id, student_id, students(full_name)')
       .eq('arm_id', reportCardsArmId)
-      .eq('term_id', appState.activeTermId);
+      .eq('term_id', appState.activeTermId)
+      .neq('status', 'withdrawn');
 
     const arm = classesWithArmsCache.flatMap(c => c.arms.map(a => ({ ...a, classId: c.id }))).find(a => a.id === reportCardsArmId);
     const { data: classSubjects } = await supabaseClient.from('class_subjects').select('subject_id').eq('class_id', arm.classId);
@@ -3032,7 +3662,7 @@ async function renderReportCardsTable(rows) {
 
   wrap.querySelectorAll('[data-publish]').forEach(btn => {
     btn.addEventListener('click', async () => {
-      if (!confirm('Publish this report card? The parent will be able to see it immediately.')) return;
+      if (!await showConfirmDialog('The parent will be able to see it immediately.', { title: 'Publish this report card?', confirmLabel: 'Publish' })) return;
       showLoading();
       try {
         const { error } = await supabaseClient
@@ -3040,6 +3670,7 @@ async function renderReportCardsTable(rows) {
         if (error) throw error;
         showToast('Published.', 'success');
         notifyReportCardPublished(btn.dataset.publish);
+        checkAndNotifyClassPublishComplete(reportCardsArmId);
         renderReportCardsTable(rows);
         checkSessionRolloverPrompt();
       } catch (err) {
@@ -3051,45 +3682,134 @@ async function renderReportCardsTable(rows) {
   });
 }
 
-// Emails the linked parent AND the class teacher once a report card becomes
-// visible to them, with a direct link (?rc=<id> — see reportCardLinkURL())
-// that opens straight to it once they sign in. Fire-and-forget —
-// sendAppsScriptEmail() already no-ops safely if no webhook is configured.
+// EMAIL 1 — fires on every individual publish. Notifies the class teacher
+// AND every admin (never the parent — parents are only emailed once the
+// whole class is done, in notifyParentsClassFullyPublished() below), with
+// a direct link (?rc=<id> — see reportCardLinkURL()) that opens straight
+// to it once they sign in. Fire-and-forget — sendAppsScriptBulkEmail()
+// already no-ops safely if no webhook is configured.
 async function notifyReportCardPublished(reportCardId) {
   const { data: card } = await supabaseClient
-    .from('report_cards').select('student_id, is_annual, enrollment_id').eq('id', reportCardId).single();
+    .from('report_cards').select('student_id, is_annual, enrollment_id, average_score, position, class_size').eq('id', reportCardId).single();
   if (!card) return;
-  const { data: student } = await supabaseClient.from('students').select('full_name, parent_id').eq('id', card.student_id).single();
+  const { data: student } = await supabaseClient.from('students').select('full_name').eq('id', card.student_id).single();
   if (!student) return;
 
   const label = card.is_annual ? 'annual report' : 'report card';
   const link = reportCardLinkURL(reportCardId);
+  const schoolName = appState.schoolSettings?.school_name || 'The school';
 
-  if (student.parent_id) {
-    const { data: parent } = await supabaseClient.from('parents').select('users(full_name, email)').eq('id', student.parent_id).single();
-    if (parent && parent.users) {
-      sendAppsScriptEmail({
-        to: parent.users.email,
-        subject: `${student.full_name}'s ${label} is ready`,
-        body: `Hello ${parent.users.full_name},\n\n${student.full_name}'s ${label} has been published. View it here:\n${link}\n\n(If that link asks you to sign in first, it'll take you straight there afterward.)\n\n— ${appState.schoolSettings?.school_name || 'The school'}`,
-      });
-    }
-  }
+  const recipients = [];
+  let className = '—', termName = '—';
 
   if (card.enrollment_id) {
     const { data: enrollment } = await supabaseClient
-      .from('enrollments').select('class_arms(class_teacher_id)').eq('id', card.enrollment_id).single();
+      .from('enrollments').select('classes(name), class_arms(class_teacher_id), terms(name)').eq('id', card.enrollment_id).single();
+    className = enrollment?.classes?.name || '—';
+    termName = enrollment?.terms?.name || '—';
     const teacherId = enrollment?.class_arms?.class_teacher_id;
     if (teacherId) {
       const { data: teacherStaff } = await supabaseClient.from('staff').select('users(full_name, email)').eq('id', teacherId).single();
-      if (teacherStaff && teacherStaff.users) {
-        sendAppsScriptEmail({
-          to: teacherStaff.users.email,
-          subject: `${student.full_name}'s ${label} has been published`,
-          body: `Hello ${teacherStaff.users.full_name},\n\n${student.full_name}'s ${label} has just been published to their parent. View it here:\n${link}\n\n— ${appState.schoolSettings?.school_name || 'The school'}`,
-        });
-      }
+      if (teacherStaff?.users?.email) recipients.push(teacherStaff.users.email);
     }
+  }
+
+  const { data: admins } = await supabaseClient.rpc('notification_emails', { p_role: 'admin' });
+  (admins || []).forEach(a => { if (a.email) recipients.push(a.email); });
+  if (recipients.length === 0) return;
+
+  sendAppsScriptBulkEmail({
+    recipients,
+    subject: `${student.full_name}'s ${label} has been published`,
+    body: `This is to notify you that ${student.full_name}'s ${label} for ${termName} has been published and is now visible to the parent/guardian.\n\nStudent: ${student.full_name}\nClass: ${className}\nTerm: ${termName}\nAverage: ${card.average_score != null ? Number(card.average_score).toFixed(1) : '—'}\nPosition: ${card.position ? `${card.position} of ${card.class_size || '—'}` : '—'}\n\nView report card:\n${link}\n\n— ${schoolName}`,
+  });
+}
+
+// Fires after every individual publish. Checks whether EVERY generated
+// report card for this arm+term now has published_at set — i.e. the whole
+// class is done. If so, fires Email 2 (teacher+admin class summary) and
+// Email 3 (one email per parent, per child). No-ops silently if the class
+// still has unpublished cards left, so this is safe to call after every
+// single publish without any extra "publish all" step.
+async function checkAndNotifyClassPublishComplete(armId) {
+  if (!armId) return;
+  try {
+    const { data: enrollments } = await supabaseClient
+      .from('enrollments').select('id, student_id')
+      .eq('arm_id', armId).eq('term_id', appState.activeTermId);
+    if (!enrollments || enrollments.length === 0) return;
+
+    const { data: cards } = await supabaseClient
+      .from('report_cards').select('id, enrollment_id, student_id, published_at')
+      .eq('term_id', appState.activeTermId).eq('is_annual', false)
+      .in('enrollment_id', enrollments.map(e => e.id));
+    if (!cards || cards.length === 0) return;
+    if (!cards.every(c => c.published_at)) return; // still cards left to publish
+
+    const arm = classesWithArmsCache.flatMap(c => c.arms.map(a => ({ ...a, className: c.name }))).find(a => a.id === armId);
+    const className = arm ? arm.className : 'the class';
+
+    const { data: term } = appState.activeTermId
+      ? await supabaseClient.from('terms').select('name').eq('id', appState.activeTermId).single() : { data: null };
+    const { data: session } = appState.activeSessionId
+      ? await supabaseClient.from('sessions').select('name').eq('id', appState.activeSessionId).single() : { data: null };
+    const termName = term?.name || 'this term';
+    const sessionName = session?.name || '';
+
+    notifyClassFullyPublished(armId, className, termName, sessionName, cards.length);
+    notifyParentsClassFullyPublished(cards, enrollments, className, termName);
+  } catch (err) {
+    console.warn('Could not check/notify class publish completion:', err);
+  }
+}
+
+// EMAIL 2 — sent once (not per student) to the class teacher + every admin
+// when the LAST report card in a class/term is published.
+async function notifyClassFullyPublished(armId, className, termName, sessionName, studentCount) {
+  try {
+    const teacherContact = await getArmTeacherContact(armId);
+    const { data: admins } = await supabaseClient.rpc('notification_emails', { p_role: 'admin' });
+    const recipients = [];
+    if (teacherContact?.email) recipients.push(teacherContact.email);
+    (admins || []).forEach(a => { if (a.email) recipients.push(a.email); });
+    if (recipients.length === 0) return;
+
+    const publishDate = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+    const schoolName = appState.schoolSettings?.school_name || 'The school';
+
+    sendAppsScriptBulkEmail({
+      recipients,
+      subject: `${className} — ${termName} Report Cards Are Now Published`,
+      body: `We are pleased to inform you that all report cards for ${className} — ${termName}${sessionName ? `, ${sessionName}` : ''} — have now been finalized and published.\n\nClass: ${className}\nTerm: ${termName}\nTotal students: ${studentCount}\nDate published: ${publishDate}\n\nView the full class list from Report Cards in your dashboard.\n\n— ${schoolName} Administration`,
+    });
+  } catch (err) {
+    console.warn('Could not notify class fully published:', err);
+  }
+}
+
+// EMAIL 3 — sent individually to each parent, one email per child, once the
+// whole class's report cards are published. This is the ONLY report-card
+// email a parent ever receives — no email goes out to them at the point an
+// individual card is published (see notifyReportCardPublished above).
+async function notifyParentsClassFullyPublished(cards, enrollments, className, termName) {
+  const enrollmentById = {};
+  enrollments.forEach(e => { enrollmentById[e.id] = e; });
+  const schoolName = appState.schoolSettings?.school_name || 'The school';
+
+  for (const card of cards) {
+    const enrollment = enrollmentById[card.enrollment_id];
+    if (!enrollment) continue;
+    const { data: student } = await supabaseClient.from('students').select('full_name, parent_id').eq('id', card.student_id).single();
+    if (!student || !student.parent_id) continue;
+    const { data: parent } = await supabaseClient.from('parents').select('users(full_name, email)').eq('id', student.parent_id).single();
+    if (!parent?.users?.email) continue;
+
+    const link = reportCardLinkURL(card.id);
+    sendAppsScriptEmail({
+      to: parent.users.email,
+      subject: `${termName} is complete — ${student.full_name}'s report card is ready`,
+      body: `Hello ${parent.users.full_name},\n\n${termName} has now concluded at ${schoolName}, and ${student.full_name}'s report card is ready to view.\n\nStudent: ${student.full_name}\nClass: ${className}\nTerm: ${termName}\n\nView report card:\n${link}\n\n— ${schoolName}`,
+    });
   }
 }
 
@@ -3100,7 +3820,7 @@ async function renderTeacherReportCardsScreen(container) {
     return;
   }
   const { data: enrollments } = await supabaseClient
-    .from('enrollments').select('id, students(full_name)').eq('arm_id', arms[0].id).eq('term_id', appState.activeTermId);
+    .from('enrollments').select('id, students(full_name)').eq('arm_id', arms[0].id).eq('term_id', appState.activeTermId).neq('status', 'withdrawn');
   const { data: cards } = await supabaseClient
     .from('report_cards').select('*').eq('term_id', appState.activeTermId).eq('is_annual', false)
     .in('enrollment_id', (enrollments || []).map(e => e.id));
@@ -3136,7 +3856,7 @@ async function renderTeacherReportCardsScreen(container) {
   });
   container.querySelectorAll('[data-confirm-card]').forEach(btn => {
     btn.addEventListener('click', async () => {
-      if (!confirm('Confirm this report card is accurate? The administrator will be able to publish it once you confirm.')) return;
+      if (!await showConfirmDialog('The administrator will be able to publish it once you confirm.', { title: 'Confirm this report card is accurate?', confirmLabel: 'Confirm accurate' })) return;
       showLoading();
       try {
         const { error } = await supabaseClient.rpc('confirm_report_card', { card_id: btn.dataset.confirmCard });
@@ -3178,64 +3898,10 @@ async function notifyAdminsReportCardConfirmed(cardId) {
   }
 }
 
-function linkChildCardHTML() {
-  return `
-    <div class="card" id="link-child-card">
-      <h2 class="card-title">Link another child</h2>
-      <p class="view-subheading">Enter their admission number and the phone number on file with the school.</p>
-      <div class="form-grid">
-        <div><label class="field-label" for="link-child-admission">Admission number</label><input class="field-input" id="link-child-admission"></div>
-        <div><label class="field-label" for="link-child-phone">Phone number on file</label><input class="field-input" id="link-child-phone" value="${escapeHtml(appState.user.phone || '')}"></div>
-      </div>
-      <p class="field-error hidden" id="link-child-error" role="alert"></p>
-      <div class="form-actions"><button type="button" class="btn btn-primary" id="link-child-submit-btn">Link child</button></div>
-    </div>`;
-}
-
-function wireLinkChildForm() {
-  const btn = document.getElementById('link-child-submit-btn');
-  if (!btn) return;
-  btn.addEventListener('click', async () => {
-    const errorEl = document.getElementById('link-child-error');
-    errorEl.classList.add('hidden');
-    const admissionNumber = document.getElementById('link-child-admission').value.trim();
-    const phone = document.getElementById('link-child-phone').value.trim();
-    if (!admissionNumber || !phone) {
-      errorEl.textContent = 'Enter both the admission number and phone number.';
-      errorEl.classList.remove('hidden');
-      return;
-    }
-    showLoading();
-    try {
-      const { data: result, error } = await supabaseClient
-        .rpc('link_parent_to_student', {
-          p_admission_number: admissionNumber,
-          p_phone: phone,
-          p_parent_name: appState.user.full_name,
-          p_parent_email: appState.user.email,
-        });
-      if (error) throw error;
-      if (!result.success) {
-        errorEl.textContent = result.error;
-        errorEl.classList.remove('hidden');
-        return;
-      }
-      showToast(`Linked ${result.full_name} to your account.`, 'success');
-      loadReportCardsScreen();
-    } catch (err) {
-      errorEl.textContent = err.message || 'Could not link that child.';
-      errorEl.classList.remove('hidden');
-    } finally {
-      hideLoading();
-    }
-  });
-}
-
 async function renderParentReportCardsScreen(container) {
   const { data: children } = await supabaseClient.from('students').select('id, full_name').eq('parent_id', appState.user.id);
   if (!children || children.length === 0) {
-    container.innerHTML = linkChildCardHTML() + `<div class="card card-notice"><p>No children linked to your account yet. Link one above, or contact the administrator.</p></div>`;
-    wireLinkChildForm();
+    container.innerHTML = `<div class="card card-notice"><p>No children linked to your account yet. Contact the administrator.</p></div>`;
     return;
   }
   const { data: cards } = await supabaseClient
@@ -3245,30 +3911,50 @@ async function renderParentReportCardsScreen(container) {
     .not('published_at', 'is', null);
 
   if (!cards || cards.length === 0) {
-    container.innerHTML = linkChildCardHTML() + `<div class="card card-notice"><p>No published report cards yet. They'll appear here as soon as the school publishes them.</p></div>`;
-    wireLinkChildForm();
+    container.innerHTML = `<div class="card card-notice"><p>No published report cards yet. They'll appear here as soon as the school publishes them.</p></div>`;
     return;
   }
 
-  container.innerHTML = linkChildCardHTML() + cards.map(c => {
+  // Sort by child name, then most recent term first, so a parent with
+  // several children/terms gets a stable, scannable order instead of raw
+  // insertion order from the query.
+  const sorted = [...cards].sort((a, b) => {
+    const an = (children.find(ch => ch.id === a.student_id)?.full_name || '');
+    const bn = (children.find(ch => ch.id === b.student_id)?.full_name || '');
+    return an.localeCompare(bn) || new Date(b.created_at || 0) - new Date(a.created_at || 0);
+  });
+
+  container.innerHTML = `<div class="rc-list">${sorted.map(c => {
     const child = children.find(ch => ch.id === c.student_id);
+    const name = child ? child.full_name : 'Student';
+    const initials = name.trim().split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase();
+    const isTopOfClass = Number(c.position) === 1;
     return `
-      <div class="card">
-        <div class="class-card-header">
-          <h3>${escapeHtml(child ? child.full_name : 'Student')} — ${escapeHtml(c.terms?.name || 'Term')}${c.is_annual ? ' (Annual)' : ''}</h3>
-          <button type="button" class="btn btn-primary" data-preview="${c.id}">View &amp; Print</button>
+      <div class="rc-card">
+        <div class="rc-card-main">
+          <div class="rc-avatar">${escapeHtml(initials)}</div>
+          <div class="rc-info">
+            <h3 class="rc-name">${escapeHtml(name)}</h3>
+            <span class="rc-term-badge">${escapeHtml(c.terms?.name || 'Term')}${c.is_annual ? ' · Annual' : ''}</span>
+          </div>
         </div>
-        <dl class="kv-list">
-          <div><dt>Average</dt><dd>${Number(c.average_score).toFixed(1)}</dd></div>
-          <div><dt>Position</dt><dd>${c.position} of ${c.class_size}</dd></div>
-        </dl>
+        <div class="rc-stats">
+          <div class="rc-stat">
+            <span class="rc-stat-label">Average</span>
+            <span class="rc-stat-value">${Number(c.average_score).toFixed(1)}</span>
+          </div>
+          <div class="rc-stat">
+            <span class="rc-stat-label">Position</span>
+            <span class="rc-stat-value">${c.position}<span class="rc-stat-of">&nbsp;of ${c.class_size}</span>${isTopOfClass ? '<span class="rc-top-badge">Top of class</span>' : ''}</span>
+          </div>
+        </div>
+        <button type="button" class="btn btn-primary rc-view-btn" data-preview="${c.id}">View &amp; Print</button>
       </div>`;
-  }).join('');
+  }).join('')}</div>`;
 
   container.querySelectorAll('[data-preview]').forEach(btn => {
     btn.addEventListener('click', () => openReportCardPreview(btn.dataset.preview));
   });
-  wireLinkChildForm();
 }
 
 /* ----------------------------------------------------------------------------
@@ -3323,7 +4009,15 @@ async function openReportCardPreview(reportCardId) {
 
     const adminPanel = document.getElementById('report-card-admin-panel');
     const publishBtn = document.getElementById('rc-publish-btn');
-    if (appState.user.role === 'admin' && !data.card.published_at) {
+    if (appState.user.role === 'admin') {
+      // Comments stay editable even after publishing — a card being
+      // published locks the scores/grades, not the remark text, so an
+      // admin can still go back and fill in (or fix) General Conduct,
+      // the Class Teacher's Remark, the Head Teacher's Remark, or the
+      // next-term details at any point. Previously this whole panel was
+      // hidden the moment published_at was set, which meant those fields
+      // could only ever be filled in BEFORE publishing and were stuck
+      // showing "—" forever if that step was missed.
       document.getElementById('rc-general-conduct').value = data.card.general_conduct || '';
       document.getElementById('rc-teacher-comment').value = data.card.class_teacher_comment || '';
       document.getElementById('rc-head-comment').value = data.card.head_teacher_comment || '';
@@ -3331,7 +4025,10 @@ async function openReportCardPreview(reportCardId) {
       document.getElementById('rc-next-term-fees').value = data.card.next_term_fees || '';
       adminPanel.classList.remove('hidden');
 
-      if (data.card.teacher_confirmed_at) {
+      if (data.card.published_at) {
+        publishBtn.disabled = true;
+        publishBtn.textContent = 'Already published';
+      } else if (data.card.teacher_confirmed_at) {
         publishBtn.disabled = false;
         publishBtn.textContent = 'Publish this report card';
       } else {
@@ -3608,7 +4305,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('rc-publish-btn').addEventListener('click', async () => {
     if (!currentPreviewCardId) return;
-    if (!confirm('Publish this report card? The parent will be able to see and print it immediately.')) return;
+    if (!await showConfirmDialog('The parent will be able to see and print it immediately.', { title: 'Publish this report card?', confirmLabel: 'Publish' })) return;
     showLoading();
     try {
       const { error } = await supabaseClient
@@ -3616,6 +4313,12 @@ document.addEventListener('DOMContentLoaded', () => {
       if (error) throw error;
       showToast('Published.', 'success');
       notifyReportCardPublished(currentPreviewCardId);
+      const { data: publishedCard } = await supabaseClient
+        .from('report_cards').select('enrollment_id').eq('id', currentPreviewCardId).single();
+      if (publishedCard?.enrollment_id) {
+        const { data: enr } = await supabaseClient.from('enrollments').select('arm_id').eq('id', publishedCard.enrollment_id).single();
+        if (enr?.arm_id) checkAndNotifyClassPublishComplete(enr.arm_id);
+      }
       closeReportCardPreview();
       loadReportCardsScreen();
       checkSessionRolloverPrompt();
@@ -3714,7 +4417,8 @@ async function generateAnnualReportsForArm(thirdTermId, allArms) {
       .from('enrollments')
       .select('id, student_id, students(full_name)')
       .eq('arm_id', promotionsArmId)
-      .eq('term_id', thirdTermId);
+      .eq('term_id', thirdTermId)
+      .neq('status', 'withdrawn');
 
     const rows = [];
     for (const e of (thirdTermEnrollments || [])) {
@@ -3879,7 +4583,7 @@ async function promoteAllPending(rows, cards, promos, arm, allArms) {
 
   const willPromote = pending.filter(p => p.recommended_status === 'promote').length;
   const willRepeat = pending.length - willPromote;
-  if (!confirm(`Apply the threshold automatically to ${pending.length} student(s)? ${willPromote} will be promoted to the next class, ${willRepeat} will repeat (resit) this class.`)) return;
+  if (!await showConfirmDialog(`${willPromote} will be promoted to the next class, ${willRepeat} will repeat (resit) this class.`, { title: `Apply the threshold to ${pending.length} student(s)?`, confirmLabel: 'Apply threshold' })) return;
 
   showLoading();
   try {
@@ -3967,7 +4671,7 @@ async function createNextSessionAndRollover({ sessionName, termDates }) {
   const { data: oldThirdTerm } = await supabaseClient
     .from('terms').select('id').eq('session_id', appState.activeSessionId).eq('name', 'Third Term').single();
   const { data: thirdTermEnrollments } = await supabaseClient
-    .from('enrollments').select('id, student_id, class_id, arm_id').eq('term_id', oldThirdTerm.id);
+    .from('enrollments').select('id, student_id, class_id, arm_id').eq('term_id', oldThirdTerm.id).neq('status', 'withdrawn');
 
   const { data: promotions } = await supabaseClient
     .from('promotions').select('student_id, final_status, to_class_id, from_class_id').eq('session_id', appState.activeSessionId);
@@ -3981,11 +4685,12 @@ async function createNextSessionAndRollover({ sessionName, termDates }) {
 
   await refreshClassesWithArmsCache();
 
-  let carried = 0, undecided = 0, skippedGraduated = 0, skippedNoArm = 0;
+  let carried = 0, undecided = 0, skippedGraduated = 0, skippedNoArm = 0, skippedWithdrawn = 0;
   const newEnrollmentRows = [];
 
   for (const e of (thirdTermEnrollments || [])) {
     if (enrollmentStatusByStudent[e.student_id] === 'graduated') { skippedGraduated++; continue; }
+    if (enrollmentStatusByStudent[e.student_id] === 'withdrawn') { skippedWithdrawn++; continue; }
 
     const promo = promoByStudent[e.student_id];
     let targetClassId = e.class_id;
@@ -4029,7 +4734,7 @@ async function createNextSessionAndRollover({ sessionName, termDates }) {
 
   setState({ activeSessionId: newSession.id, activeTermId: newFirstTerm.id });
 
-  return { carried, undecided, skippedGraduated, skippedNoArm };
+  return { carried, undecided, skippedGraduated, skippedNoArm, skippedWithdrawn };
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -4072,6 +4777,7 @@ document.addEventListener('DOMContentLoaded', () => {
         `"${sessionName}" is now the active session. ${result.carried} student(s) carried into First Term` +
         (result.undecided > 0 ? ` (${result.undecided} without a promotion decision — carried at their current class)` : '') +
         (result.skippedGraduated > 0 ? `. ${result.skippedGraduated} graduated student(s) skipped` : '') +
+        (result.skippedWithdrawn > 0 ? `. ${result.skippedWithdrawn} withdrawn student(s) skipped` : '') +
         (result.skippedNoArm > 0 ? `. ${result.skippedNoArm} skipped — target class isn't set up yet` : '') + '.',
         'success'
       );
@@ -4144,7 +4850,7 @@ async function loadDashboardAnalytics() {
   let enrollmentChart = '<p class="view-subheading">No active term.</p>';
   if (appState.activeTermId) {
     const { data: enrollments } = await supabaseClient
-      .from('enrollments').select('class_id, classes(name)').eq('term_id', appState.activeTermId);
+      .from('enrollments').select('class_id, classes(name)').eq('term_id', appState.activeTermId).neq('status', 'withdrawn');
     const byClass = {};
     (enrollments || []).forEach(e => {
       const name = e.classes?.name || 'Unknown';
@@ -4268,7 +4974,7 @@ async function renderAdminAnnouncementsScreen(container) {
   list.querySelectorAll('[data-publish-ann]').forEach(btn => btn.addEventListener('click', () => setAnnouncementPublished(btn.dataset.publishAnn, true)));
   list.querySelectorAll('[data-unpublish-ann]').forEach(btn => btn.addEventListener('click', () => setAnnouncementPublished(btn.dataset.unpublishAnn, false)));
   list.querySelectorAll('[data-delete-ann]').forEach(btn => btn.addEventListener('click', async () => {
-    if (!confirm('Delete this announcement permanently?')) return;
+    if (!await showConfirmDialog('This cannot be undone.', { title: 'Delete this announcement?', confirmLabel: 'Delete', danger: true })) return;
     showLoading();
     try {
       const { error } = await supabaseClient.from('announcements').delete().eq('id', btn.dataset.deleteAnn);
@@ -4405,7 +5111,10 @@ async function loadSettingsScreen() {
 
     termsCardHTML = `
       <div class="card">
-        <h2 class="card-title">Academic term</h2>
+        <div class="card-title-row">
+          <h2 class="card-title">Academic term</h2>
+          <span class="badge badge-navy">${escapeHtml(terms.find(t => t.is_current)?.name || 'No current term')}</span>
+        </div>
         <p class="view-subheading">Only one term can be active at a time — it drives every screen in the app (results entry, report cards, dashboards). Switching is safe: past terms and their results, approvals, and report cards stay exactly as they are.</p>
         <table class="data-table">
           <thead><tr><th>Term</th><th>Dates</th><th>Result entry</th><th>Status</th><th></th></tr></thead>
@@ -4433,6 +5142,9 @@ async function loadSettingsScreen() {
 
     <div class="card">
       <h2 class="card-title">Identity &amp; branding</h2>
+      <p class="view-subheading">Applies app-wide immediately — the login screen, sidebar, and every generated report card.</p>
+
+      <p class="settings-subhead">Basic details</p>
       <div class="form-grid">
         <div><label class="field-label">School name</label><input class="field-input" id="set-school-name" value="${escapeHtml(s.school_name || '')}"></div>
         <div><label class="field-label">Motto</label><input class="field-input" id="set-motto" value="${escapeHtml(s.motto || '')}"></div>
@@ -4440,11 +5152,23 @@ async function loadSettingsScreen() {
         <div><label class="field-label">Email</label><input class="field-input" id="set-email" value="${escapeHtml(s.email || '')}"></div>
         <div><label class="field-label">Address</label><input class="field-input" id="set-address" value="${escapeHtml(s.address || '')}"></div>
         <div><label class="field-label">Principal's name</label><input class="field-input" id="set-principal-name" value="${escapeHtml(s.principal_name || '')}"></div>
-        <div><label class="field-label">Theme color</label><input class="field-input" type="color" id="set-theme-color" value="${s.theme_color || '#1B2A4A'}"></div>
-        <div><label class="field-label">New logo (optional)</label><input class="field-input" type="file" id="set-logo-file" accept="image/*"></div>
-        <div><label class="field-label">New principal signature (optional)</label><input class="field-input" type="file" id="set-signature-file" accept="image/*"></div>
-        <div><label class="field-label">New report watermark (optional)</label><input class="field-input" type="file" id="set-watermark-file" accept="image/*"></div>
       </div>
+
+      <p class="settings-subhead">Branding assets</p>
+      <div class="form-grid">
+        <div>
+          <label class="field-label">Theme color</label>
+          <div class="theme-color-row">
+            <input class="field-input" type="color" id="set-theme-color" value="${s.theme_color || '#1B2A4A'}">
+            <span class="theme-color-hex" id="set-theme-color-hex">${escapeHtml(s.theme_color || '#1B2A4A')}</span>
+          </div>
+        </div>
+        <div></div>
+        <div><label class="field-label">New logo</label><input class="field-input" type="file" id="set-logo-file" accept="image/*"></div>
+        <div><label class="field-label">New principal signature</label><input class="field-input" type="file" id="set-signature-file" accept="image/*"></div>
+        <div><label class="field-label">New report watermark</label><input class="field-input" type="file" id="set-watermark-file" accept="image/*"></div>
+      </div>
+
       <div class="form-actions"><button type="button" class="btn btn-primary" id="save-settings-btn">Save settings</button></div>
     </div>
 
@@ -4479,13 +5203,22 @@ async function loadSettingsScreen() {
     </div>
   `;
 
+  const themeColorInput = document.getElementById('set-theme-color');
+  const themeColorHex = document.getElementById('set-theme-color-hex');
+  if (themeColorInput) {
+    themeColorInput.addEventListener('input', () => {
+      themeColorHex.textContent = themeColorInput.value.toUpperCase();
+    });
+  }
+
+
   await loadAndRenderGradingRules();
   wireGradingRulesForm();
 
   container.querySelectorAll('[data-make-active]').forEach(btn => {
     btn.addEventListener('click', async () => {
       const term = terms.find(t => t.id === btn.dataset.makeActive);
-      if (!confirm(`Make "${term ? term.name : 'this term'}" the active term? Everyone will immediately see it as the current term app-wide. Students will automatically carry over into it from whichever term they were last enrolled in this session — nothing changes for them unless you transfer or promote them yourself. Result entry for it will need to be opened separately below if needed.`)) return;
+      if (!await showConfirmDialog(`Everyone will immediately see it as the current term app-wide. Students will automatically carry over into it from whichever term they were last enrolled in this session — nothing changes for them unless you transfer or promote them yourself. Result entry for it will need to be opened separately below if needed.`, { title: `Make "${term ? term.name : 'this term'}" the active term?`, confirmLabel: 'Make active' })) return;
       showLoading();
       try {
         const { error: clearErr } = await supabaseClient
@@ -4893,6 +5626,18 @@ async function exportTableAsJSON(table) {
    28. BOOTSTRAP — wire up events, restore session on reload
    ---------------------------------------------------------------------------- */
 async function bootstrap() {
+  document.querySelectorAll('[data-password-toggle]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const input = document.getElementById(btn.dataset.passwordToggle);
+      if (!input) return;
+      const nowVisible = input.type === 'password';
+      input.type = nowVisible ? 'text' : 'password';
+      btn.querySelector('.icon-eye-open').classList.toggle('hidden', nowVisible);
+      btn.querySelector('.icon-eye-closed').classList.toggle('hidden', !nowVisible);
+      btn.setAttribute('aria-label', nowVisible ? 'Hide password' : 'Show password');
+    });
+  });
+
   document.getElementById('login-form').addEventListener('submit', handleLoginSubmit);
   document.getElementById('forgot-password-btn').addEventListener('click', () => showResetForm(true));
   document.getElementById('back-to-login-from-reset-btn').addEventListener('click', () => showResetForm(false));
@@ -4921,6 +5666,7 @@ async function bootstrap() {
   document.getElementById('logout-btn').addEventListener('click', handleLogout);
   document.getElementById('sidebar-toggle-btn').addEventListener('click', toggleSidebar);
   document.getElementById('sidebar-backdrop').addEventListener('click', closeMobileSidebar);
+  initConfirmDialog();
 
   // A report-card-published email links straight to ?rc=<id>. Stash it
   // (works whether or not the person is signed in yet) and consume it once
