@@ -670,13 +670,14 @@ Social Studies"></textarea>
           <p class="view-subheading">CA is out of 40, Exam is out of 60. Totals, grades, and remarks are calculated automatically — you never enter them.</p>
         </div>
 
-        <div class="card">
-          <div class="form-grid">
-            <div>
+        <div class="card results-toolbar-card">
+          <div class="results-toolbar">
+            <div class="results-toolbar-field">
               <label class="field-label" for="results-arm-select">Class</label>
               <select class="field-input" id="results-arm-select"></select>
             </div>
-            <div>
+            <div class="results-toolbar-divider" aria-hidden="true"></div>
+            <div class="results-toolbar-field">
               <label class="field-label" for="results-subject-select">Subject</label>
               <select class="field-input" id="results-subject-select"></select>
             </div>
@@ -686,12 +687,21 @@ Social Studies"></textarea>
 
         <div id="results-entry-notice"></div>
 
-        <table class="data-table" id="results-entry-table" style="display:none;">
-          <thead><tr><th>Student</th><th style="width:90px;">CA (40)</th><th style="width:90px;">Exam (60)</th><th style="width:70px;">Total</th><th>Status</th><th></th></tr></thead>
+        <table class="data-table results-data-table" id="results-entry-table" style="display:none;">
+          <thead>
+            <tr>
+              <th class="col-student">Student</th>
+              <th class="col-score">CA <span class="th-sub">/ 40</span></th>
+              <th class="col-score">Exam <span class="th-sub">/ 60</span></th>
+              <th class="col-total">Total</th>
+              <th class="col-status">Status</th>
+              <th class="col-actions"></th>
+            </tr>
+          </thead>
           <tbody id="results-entry-body"></tbody>
         </table>
 
-        <div class="form-actions" id="results-submit-row" style="display:none;">
+        <div class="form-actions results-submit-row" id="results-submit-row" style="display:none;">
           <button type="button" class="btn btn-ghost-dark" id="results-save-all-btn">Save all as draft</button>
           <button type="button" class="btn btn-primary" id="results-submit-btn">Submit all drafts for approval</button>
         </div>
