@@ -2926,18 +2926,27 @@ async function renderResultsEntryTable() {
     const badgeClass = { draft: 'badge-navy', submitted: 'badge-gold', approved: 'badge-success', rejected: 'badge-error' }[status];
     const badgeLabel = { draft: 'Draft', submitted: 'Submitted', approved: 'Approved', rejected: 'Rejected' }[status];
 
+    const initials = e.students.full_name
+      .split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0]).join('').toUpperCase();
+
     return `
       <tr data-enrollment-id="${e.id}" data-student-id="${e.student_id}">
-        <td>${escapeHtml(e.students.full_name)}
-          ${status === 'rejected' && r.rejection_reason ? `<div class="rejection-note">Rejected: ${escapeHtml(r.rejection_reason)}</div>` : ''}
-        </td>
-        <td><input class="score-input" type="number" min="0" max="40" data-field="ca" value="${caVal}" ${editable ? '' : 'disabled'}></td>
-        <td><input class="score-input" type="number" min="0" max="60" data-field="exam" value="${examVal}" ${editable ? '' : 'disabled'}></td>
-        <td class="row-total">${totalVal}</td>
-        <td><span class="badge ${badgeClass}">${badgeLabel}</span></td>
         <td>
-          ${status === 'rejected' ? `<button type="button" class="icon-btn" data-reopen="${e.id}">Reopen to edit</button>` : ''}
-          ${editable ? `<button type="button" class="icon-btn" data-save-row="${e.id}">Save</button>` : ''}
+          <div class="student-cell">
+            <span class="student-avatar">${initials}</span>
+            <div>
+              <div class="student-name">${escapeHtml(e.students.full_name)}</div>
+              ${status === 'rejected' && r.rejection_reason ? `<div class="rejection-note">Rejected: ${escapeHtml(r.rejection_reason)}</div>` : ''}
+            </div>
+          </div>
+        </td>
+        <td class="col-score"><input class="score-input" type="number" min="0" max="40" data-field="ca" placeholder="—" value="${caVal}" ${editable ? '' : 'disabled'}></td>
+        <td class="col-score"><input class="score-input" type="number" min="0" max="60" data-field="exam" placeholder="—" value="${examVal}" ${editable ? '' : 'disabled'}></td>
+        <td class="col-total row-total">${totalVal}</td>
+        <td class="col-status"><span class="badge ${badgeClass}">${badgeLabel}</span></td>
+        <td class="col-actions row-actions">
+          ${status === 'rejected' ? `<button type="button" class="icon-btn" data-reopen="${e.id}">Reopen</button>` : ''}
+          ${editable ? `<button type="button" class="icon-btn icon-btn-save" data-save-row="${e.id}">Save</button>` : ''}
         </td>
       </tr>`;
   }).join('');
@@ -3046,7 +3055,7 @@ async function saveAllResultsAsDraft() {
   editableRows.forEach(row => {
     const caVal = row.querySelector('[data-field="ca"]').value;
     const examVal = row.querySelector('[data-field="exam"]').value;
-    const studentName = row.querySelector('td').textContent.trim();
+    const studentName = row.querySelector('.student-name').textContent.trim();
 
     if (caVal === '' && examVal === '') return; // untouched row — skip silently
     if (caVal === '' || examVal === '') {
@@ -4606,11 +4615,12 @@ async function promoteAllPending(rows, cards, promos, arm, allArms) {
    21b. SESSION ROLLOVER — "move to a new academic session"
    Trigger points: right after any Third Term report card is published, and
    once on every admin login. Both call checkSessionRolloverPrompt(), which
-   only actually shows the modal if (a) at least one Third Term report card
-   in the current session has been published, and (b) no successor session
-   exists yet (sessions.previous_session_id pointing back to this one) — so
-   saying "Not yet" is free: nothing is written, and the same check just
-   fires again next time.
+   only actually shows the modal if (a) EVERY enrolled Third Term student
+   across every class has a published report card — i.e. the whole session
+   is done, not just one class — and (b) no successor session exists yet
+   (sessions.previous_session_id pointing back to this one) — so saying
+   "Not yet" is free: nothing is written, and the same check just fires
+   again next time.
    ---------------------------------------------------------------------------- */
 async function checkSessionRolloverPrompt() {
   if (!appState.user || appState.user.role !== 'admin' || !appState.activeSessionId) return;
@@ -4620,13 +4630,19 @@ async function checkSessionRolloverPrompt() {
   if (!thirdTerm) return;
 
   const { data: thirdTermEnrollments } = await supabaseClient
-    .from('enrollments').select('id').eq('term_id', thirdTerm.id);
+    .from('enrollments').select('id').eq('term_id', thirdTerm.id).neq('status', 'withdrawn');
   if (!thirdTermEnrollments || thirdTermEnrollments.length === 0) return;
 
-  const { data: publishedCards } = await supabaseClient
-    .from('report_cards').select('id').eq('is_annual', false).not('published_at', 'is', null)
-    .in('enrollment_id', thirdTermEnrollments.map(e => e.id)).limit(1);
-  if (!publishedCards || publishedCards.length === 0) return;
+  // Every enrolled student, across every class, needs a published report
+  // card before we prompt — one class finishing early isn't enough.
+  const { data: cards } = await supabaseClient
+    .from('report_cards').select('enrollment_id, published_at').eq('is_annual', false)
+    .in('enrollment_id', thirdTermEnrollments.map(e => e.id));
+
+  const publishedByEnrollment = {};
+  (cards || []).forEach(c => { if (c.published_at) publishedByEnrollment[c.enrollment_id] = true; });
+  const allPublished = thirdTermEnrollments.every(e => publishedByEnrollment[e.id]);
+  if (!allPublished) return;
 
   const { data: successor } = await supabaseClient
     .from('sessions').select('id').eq('previous_session_id', appState.activeSessionId).maybeSingle();
