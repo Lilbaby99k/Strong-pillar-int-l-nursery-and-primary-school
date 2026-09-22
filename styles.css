@@ -119,96 +119,263 @@ input { font-family: inherit; }
 }
 
 /* ============================================================================
-   LOGIN VIEW — split screen
+   LOGIN VIEW — PARENT PORTAL
+   A single rounded card floating on a pale blue field, split down the middle:
+   a photographic brand pane on the left, the form on the right. The
+   decorative circles behind it are drawn with pseudo-elements so no extra
+   image files are needed.
+
+   OPTIONAL PHOTO: drop a picture of the pupils at assets/pupils.jpg and it
+   appears behind the navy wash on the left pane. If the file isn't there,
+   the gradient alone still looks finished — nothing breaks.
    ============================================================================ */
 .view-login {
   min-height: 100vh;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-}
-@media (max-width: 860px) {
-  .view-login { grid-template-columns: 1fr; }
-  .login-brand-pane { min-height: 240px; }
-}
-
-.login-brand-pane {
-  background: radial-gradient(circle at 20% 20%, var(--color-navy-lighter), var(--color-navy) 65%);
-  color: var(--color-paper);
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  text-align: center;
-  padding: 48px 32px;
+  padding: 48px 24px;
+  background: #EEF4F8;
+  position: relative;
+  overflow: hidden;
 }
-.login-seal {
-  width: 72px;
-  height: 72px;
+.view-login::before,
+.view-login::after {
+  content: "";
+  position: absolute;
   border-radius: 50%;
-  border: 2px solid var(--color-gold);
-  color: var(--color-gold);
+  pointer-events: none;
+}
+.view-login::before {
+  width: 120px; height: 120px;
+  left: 6%; top: 16%;
+  border: 1.5px solid rgba(27, 42, 74, 0.16);
+}
+.view-login::after {
+  width: 300px; height: 300px;
+  right: -60px; bottom: -70px;
+  border: 1.5px solid rgba(201, 154, 62, 0.35);
+}
+
+.auth-shell {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 1120px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  background: var(--color-surface);
+  border-radius: 18px;
+  box-shadow: 0 24px 60px rgba(27, 42, 74, 0.13), 0 2px 6px rgba(27, 42, 74, 0.06);
+  overflow: hidden;
+}
+
+/* ---- Left: brand pane ---------------------------------------------------- */
+.auth-brand {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 40px;
+  padding: 40px 38px;
+  color: var(--color-paper);
+  min-height: 640px;
+  background-color: var(--color-navy);
+  background-image:
+    linear-gradient(200deg, rgba(27, 42, 74, 0.72) 0%, rgba(27, 42, 74, 0.86) 55%, rgba(13, 22, 42, 0.95) 100%),
+    url("assets/pupils.jpg");
+  background-size: cover;
+  background-position: center;
+}
+
+.auth-brand-top { display: flex; align-items: center; gap: 16px; }
+
+.auth-crest {
+  flex: 0 0 auto;
+  width: 66px; height: 66px;
+  border-radius: 50%;
+  background: var(--color-gold);
   display: flex;
   align-items: center;
   justify-content: center;
   font-family: var(--font-display);
   font-weight: 700;
   font-size: 22px;
-  margin-bottom: 20px;
-}
-.login-school-name {
-  font-size: clamp(22px, 3vw, 30px);
-  max-width: 420px;
-  line-height: 1.25;
-}
-.login-motto {
-  color: var(--color-gold-light);
-  font-size: 14px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  margin-top: 10px;
-}
-.ledger-rule {
-  width: 64px;
-  height: 1px;
-  background: var(--color-gold);
-  margin: 24px 0;
-}
-.login-brand-footnote {
-  font-size: 12px;
-  color: rgba(247,245,240,0.6);
-  letter-spacing: 0.08em;
-}
-
-.login-form-pane {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 48px 32px;
-  background: var(--color-paper);
-}
-.login-form-card {
-  width: 100%;
-  max-width: 380px;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-top: 3px solid var(--color-gold);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-card);
-  padding: 40px 36px 32px;
+  color: var(--color-navy);
   overflow: hidden;
 }
-.login-form-title {
-  font-size: 26px;
+.auth-crest-img { width: 100%; height: 100%; object-fit: contain; }
+.auth-crest:has(.auth-crest-img:not(.hidden)) { background: transparent; }
+
+.auth-brand-words { display: flex; flex-direction: column; gap: 5px; }
+.auth-brand-words strong {
+  font-family: var(--font-body);
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+}
+.auth-brand-words span {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-gold-light);
+}
+
+.auth-brand-headline {
+  font-family: var(--font-display);
+  font-size: 46px;
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  margin-bottom: 12px;
+}
+.auth-brand-headline em { font-style: normal; color: var(--color-gold); }
+.auth-brand-tagline { font-size: 16px; color: rgba(247, 245, 240, 0.86); }
+.auth-brand-rule {
+  display: block;
+  width: 78px; height: 5px;
+  border-radius: 3px;
+  background: var(--color-gold);
+  margin-top: 26px;
+}
+
+/* ---- Right: form pane ---------------------------------------------------- */
+.auth-pane {
+  border-top: 3px solid var(--color-gold);
+  padding: 52px 52px 34px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.auth-card { display: flex; flex-direction: column; }
+.auth-title {
+  font-family: var(--font-body);
+  font-size: 27px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
   color: var(--color-navy);
-  letter-spacing: -0.01em;
-  margin-bottom: 10px;
+}
+.auth-sub { color: var(--color-slate); font-size: 14.5px; margin: 10px 0 30px; }
+
+/* Icon-prefixed inputs. The icon is decorative; the padding on the input is
+   what keeps the text clear of it. */
+.auth-field { position: relative; }
+.auth-field .field-input { padding-left: 46px; }
+.auth-field .field-input[type="password"],
+.auth-field .field-input[type="text"]#login-password { padding-right: 46px; }
+.auth-field-icon {
+  position: absolute;
+  left: 15px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--color-slate);
+  opacity: 0.65;
+  pointer-events: none;
+}
+
+.auth-label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.auth-label-row .field-label { margin-bottom: 0; }
+
+.auth-inline-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--color-navy);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.auth-inline-link:hover { color: var(--color-gold); }
+.auth-inline-link.strong { font-weight: 700; }
+
+.auth-remember {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 18px 0 22px;
+  font-size: 14px;
+  color: var(--color-ink);
+  cursor: pointer;
+}
+.auth-remember input {
+  width: 17px; height: 17px;
+  accent-color: var(--color-navy);
+  cursor: pointer;
+}
+
+.btn-auth {
+  width: 100%;
+  justify-content: center;
+  padding: 15px 18px;
+  font-size: 15px;
+  border-radius: var(--radius-md);
+}
+
+.auth-alt {
+  margin-top: 26px;
+  padding-top: 22px;
+  border-top: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  text-align: center;
+  font-size: 14px;
+  color: var(--color-slate);
+}
+.auth-alt p { margin: 0; }
+
+.auth-footer {
+  margin-top: 34px;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--color-slate);
+}
+
+/* ---- The other panels (reset / register / contact) reuse the same pane ---- */
+.login-form-card {
+  display: flex;
+  flex-direction: column;
+}
+.login-form-title {
+  font-family: var(--font-body);
+  font-size: 25px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--color-navy);
 }
 .login-form-subtitle {
   color: var(--color-slate);
   font-size: 14px;
   line-height: 1.5;
-  margin: 8px 0 30px;
+  margin: 10px 0 28px;
 }
+
+@media (max-width: 900px) {
+  .auth-shell { grid-template-columns: 1fr; max-width: 520px; }
+  .auth-brand { min-height: 0; gap: 30px; padding: 32px 28px; }
+  .auth-brand-headline { font-size: 34px; }
+  .auth-brand-rule { margin-top: 16px; }
+  .auth-pane { padding: 34px 28px 26px; }
+}
+@media (max-width: 520px) {
+  .view-login { padding: 0; background: var(--color-surface); }
+  .view-login::before, .view-login::after { display: none; }
+  .auth-shell { border-radius: 0; box-shadow: none; max-width: none; }
+  .auth-title { font-size: 23px; }
+}
+
+/* ----------------------------------------------------------------------------
+   NOTE: from here down this file is identical in both portals — it is the
+   shared component layer (fields, buttons, tables, cards, modals, the app
+   shell, and the report-card print stylesheet). Only the LOGIN VIEW block
+   above differs between the parent and staff builds.
+   ---------------------------------------------------------------------------- */
 
 .field-label {
   display: block;
@@ -1115,6 +1282,222 @@ input { font-family: inherit; }
 }
 .dashboard-stat-value { font-family: var(--font-display); font-size: 26px; color: var(--color-navy); }
 .dashboard-stat-label { font-size: 11.5px; color: var(--color-slate); text-transform: uppercase; letter-spacing: 0.03em; margin-top: 2px; }
+
+/* ============================================================================
+   PARENT PORTAL — Guardian Dashboard / My Children
+   Layout follows the reference: greeting banner, two stat cards, a profile
+   card and a linked-students table side by side, then a students screen with
+   filter tabs and a search box. Dressed in the site's existing navy/gold
+   palette so it matches the login screen this app already has, rather than
+   the light-blue skin in the reference screenshots.
+   ============================================================================ */
+.visually-hidden {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.pg-banner {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  background: linear-gradient(135deg, var(--color-navy) 0%, var(--color-navy-light) 100%);
+  color: var(--color-paper);
+  border-radius: var(--radius-md);
+  padding: 22px 26px;
+  margin-bottom: 18px;
+}
+.pg-banner h2 {
+  font-family: var(--font-display);
+  font-size: 21px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.pg-banner p { font-size: 13.5px; color: rgba(247, 245, 240, 0.82); max-width: 46ch; }
+.pg-banner-date {
+  flex: 0 0 auto;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  padding: 7px 14px;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.pg-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.pg-stat-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 16px 18px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.pg-stat-icon {
+  flex: 0 0 auto;
+  width: 40px; height: 40px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--color-paper);
+  color: var(--color-navy);
+  font-size: 15px;
+}
+.pg-stat-icon-accent { background: var(--color-success-bg); color: var(--color-success); }
+.pg-stat-label { font-size: 11.5px; color: var(--color-slate); text-transform: uppercase; letter-spacing: 0.03em; }
+.pg-stat-value { font-family: var(--font-display); font-size: 22px; color: var(--color-navy); margin-top: 2px; }
+.pg-stat-value-accent { color: var(--color-success); }
+
+.pg-columns {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 16px;
+  align-items: start;
+  margin-bottom: 18px;
+}
+@media (max-width: 900px) {
+  .pg-columns { grid-template-columns: 1fr; }
+}
+
+.pg-avatar-row { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
+.pg-avatar {
+  flex: 0 0 auto;
+  width: 52px; height: 52px;
+  border-radius: 50%;
+  background: var(--color-navy);
+  color: var(--color-paper);
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 17px;
+}
+.pg-avatar-lg { width: 64px; height: 64px; font-size: 21px; }
+.pg-avatar-name { font-weight: 700; color: var(--color-navy); font-size: 15px; }
+.pg-avatar-role { font-size: 12.5px; color: var(--color-slate); margin-top: 2px; }
+
+.pg-detail-list { display: flex; flex-direction: column; gap: 12px; margin-bottom: 4px; }
+.pg-detail-list div { display: flex; flex-direction: column; gap: 2px; padding: 10px 0; border-top: 1px solid var(--color-border); }
+.pg-detail-list div:first-child { border-top: none; padding-top: 0; }
+.pg-detail-list dt { font-size: 11px; color: var(--color-slate); text-transform: uppercase; letter-spacing: 0.03em; }
+.pg-detail-list dd { font-size: 14px; color: var(--color-ink); font-weight: 600; }
+
+.pg-address-block {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--color-border);
+}
+.pg-detail-label { font-size: 11px; color: var(--color-slate); text-transform: uppercase; letter-spacing: 0.03em; }
+.pg-address-block p { font-size: 13.5px; color: var(--color-ink); margin-top: 4px; line-height: 1.5; }
+
+.pg-linked-card { min-width: 0; }
+.pg-linked-table th, .pg-linked-table td { white-space: nowrap; }
+.pg-student-cell { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+.pg-mini-avatar {
+  flex: 0 0 auto;
+  width: 30px; height: 30px;
+  border-radius: 50%;
+  background: var(--color-paper);
+  border: 1px solid var(--color-border);
+  color: var(--color-navy);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11.5px;
+  font-weight: 700;
+}
+.btn-sm { padding: 7px 14px; font-size: 12.5px; }
+
+.pg-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.pg-filter-tabs { display: flex; gap: 6px; background: var(--color-paper); border-radius: 999px; padding: 4px; }
+.pg-filter-tab {
+  border: none;
+  background: transparent;
+  padding: 7px 16px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-slate);
+}
+.pg-filter-tab.active { background: var(--color-navy); color: var(--color-paper); }
+.pg-search-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 8px 14px;
+  min-width: 220px;
+  flex: 1 1 220px;
+  max-width: 320px;
+}
+.pg-search-box span { color: var(--color-slate); opacity: 0.7; }
+.pg-search-box input { border: none; outline: none; flex: 1; font-size: 13.5px; background: transparent; }
+
+.pg-empty-row { text-align: center; color: var(--color-slate); padding: 26px 0; }
+.pg-showing-count { font-size: 12.5px; color: var(--color-slate); margin-top: 10px; }
+
+.pg-profile-card-standalone { max-width: 460px; }
+
+/* ---- Phone (real narrow-screen pass, not just the tablet stack above) ---- */
+@media (max-width: 560px) {
+  .pg-banner {
+    flex-direction: column;
+    align-items: flex-start;
+    padding: 18px 18px;
+    gap: 10px;
+  }
+  .pg-banner h2 { font-size: 18px; }
+  .pg-banner p { font-size: 13px; max-width: none; }
+  .pg-banner-date { align-self: flex-start; }
+
+  .pg-stat-grid { grid-template-columns: 1fr 1fr; gap: 10px; }
+  .pg-stat-card { padding: 12px 12px; gap: 10px; }
+  .pg-stat-icon { width: 34px; height: 34px; font-size: 13px; }
+  .pg-stat-value { font-size: 18px; }
+
+  .pg-columns { gap: 12px; }
+  .pg-profile-card-standalone { max-width: none; }
+  .pg-avatar { width: 46px; height: 46px; font-size: 15px; }
+  .pg-avatar-lg { width: 56px; height: 56px; font-size: 19px; }
+
+  /* The linked-students and students tables scroll sideways below 700px via
+     the shared .data-table rule; here the row content itself is also
+     shrunk so a thumb can actually read it without zooming. */
+  .pg-linked-table th, .pg-linked-table td { padding: 9px 10px; font-size: 12.5px; }
+  .pg-student-cell { gap: 7px; }
+  .pg-mini-avatar { width: 25px; height: 25px; font-size: 10px; }
+  .btn-sm { padding: 6px 11px; font-size: 12px; }
+
+  .pg-toolbar { flex-direction: column; align-items: stretch; gap: 10px; }
+  .pg-filter-tabs { width: 100%; justify-content: stretch; }
+  .pg-filter-tab { flex: 1; text-align: center; padding: 8px 10px; }
+  .pg-search-box { max-width: none; width: 100%; }
+}
+
+@media (max-width: 380px) {
+  /* The narrowest common phones (SE-class, ~375px and below) — two stat
+     cards side by side get genuinely tight, so let the number-and-label
+     stack instead of sitting next to the icon. */
+  .pg-stat-grid { grid-template-columns: 1fr; }
+  .pg-banner h2 { font-size: 17px; }
+}
 .dashboard-chart-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1257,6 +1640,9 @@ input { font-family: inherit; }
   background: var(--color-surface);
   border-bottom: 1px solid var(--color-border);
 }
+@media (max-width: 640px) {
+  .app-topbar { padding: 12px 14px; gap: 10px; }
+}
 .sidebar-toggle {
   background: none;
   border: 1px solid var(--color-border);
@@ -1275,6 +1661,12 @@ input { font-family: inherit; }
   flex: 1;
   padding: 28px;
   overflow-y: auto;
+}
+@media (max-width: 640px) {
+  .app-content { padding: 16px; }
+  .view-header { margin-bottom: 18px; }
+  .view-header h1 { font-size: 21px; }
+  .card { padding: 16px 16px; margin-bottom: 14px; }
 }
 
 .content-view { max-width: 920px; animation: view-fade-in 0.18s ease-out; }
